@@ -7,6 +7,10 @@
     "name": "Integracja Wapro",
     "email": "kontakt@twojafirma.pl"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Wiktor10993/wapro-sync-agent.git"
+  },
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
