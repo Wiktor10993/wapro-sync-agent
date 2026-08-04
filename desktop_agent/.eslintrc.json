@@ -1,0 +1,33 @@
+{
+  "root": true,
+  "env": {
+    "node": true,
+    "es2022": true,
+    "browser": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "module",
+    "ecmaFeatures": { "jsx": true }
+  },
+  "extends": ["eslint:recommended"],
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "no-console": "off"
+  },
+  "overrides": [
+    {
+      "files": ["src/renderer/**/*.jsx"],
+      "globals": { "window": "readonly", "document": "readonly", "confirm": "readonly" },
+      "rules": {
+        "no-undef": "off"
+      }
+    },
+    {
+      "files": ["test/**/*.js"],
+      "env": { "node": true }
+    }
+  ],
+  "ignorePatterns": ["node_modules/", "out/", "dist/"]
+}

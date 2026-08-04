@@ -1,0 +1,6 @@
+Katalog na bazę SQLite i logi huba.
+
+MUSI leżeć poza public/ — inaczej baza byłaby do pobrania przez HTTP.
+Uprawnienia: 700 (tylko właściciel procesu PHP).
+
+Zawartość tego katalogu jest ignorowana przez git (patrz ../.gitignore).

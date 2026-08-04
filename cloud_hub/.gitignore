@@ -1,0 +1,13 @@
+# Baza i logi — nigdy do repozytorium
+storage/*.sqlite
+storage/*.sqlite-wal
+storage/*.sqlite-shm
+storage/*.log
+
+# Sekrety
+dev.env
+.env
+
+# System
+.DS_Store
+Thumbs.db

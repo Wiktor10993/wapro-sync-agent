@@ -1,0 +1,15 @@
+RewriteEngine On
+
+# Przekaż nagłówek Authorization (gubiony przez niektóre konfiguracje FastCGI)
+RewriteCond %{HTTP:Authorization} ^(.+)$
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+
+# Front controller
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+# Nie serwuj plików bazy, gdyby ktoś je tu przeniósł
+<FilesMatch "\.(sqlite|sqlite-wal|sqlite-shm|log)$">
+    Require all denied
+</FilesMatch>

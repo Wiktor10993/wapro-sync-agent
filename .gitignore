@@ -1,0 +1,12 @@
+# Folder roboczy na pliki ECO w testach lokalnych
+nasluch_wapro/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Edytory
+.vscode/
+.idea/
+*.swp
+.trash_node_modules/
