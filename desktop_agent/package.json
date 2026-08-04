@@ -1,6 +1,6 @@
 {
   "name": "wapro-sync-agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Lokalny agent synchronizacji Wapro Mag ⇄ Allegro / BaseLinker (stany i zamówienia).",
   "author": {
