@@ -1,5 +1,12 @@
 import { getPool, sql, translateError } from './pool.js'
-import { mergeProfile, quoteIdent, sectionRef, sectionSchema } from './schemaMap.js'
+import {
+  mergeProfile,
+  optionalColumnExpr,
+  quoteIdent,
+  resolveStockColumns,
+  sectionRef,
+  sectionSchema
+} from './schemaMap.js'
 
 // Reeksport dla zgodności — logika diffu żyje w osobnym, bezzależnościowym module.
 export { diffSnapshot } from './stockDiff.js'
@@ -14,11 +21,44 @@ export { diffSnapshot } from './stockDiff.js'
  */
 
 /**
- * Zwraca zbiór (uppercase) nazw kolumn danej tabeli z INFORMATION_SCHEMA.
- * Dzięki temu przed użyciem kolumny (np. kodu kreskowego) sprawdzamy, czy w
- * ogóle istnieje w danej wersji Wapro — różne wydania mają różne schematy.
+ * Cache introspekcji kolumn. Bez niego każdy przebieg SyncUp (a przy dwóch
+ * kanałach — BaseLinker i Allegro — dwa przebiegi) odpytywałby
+ * INFORMATION_SCHEMA po kilka razy na cykl. Krótki TTL + ręczne unieważnianie
+ * przy zapisie ustawień bazy/schematu daje aktualność bez zbędnych round-tripów.
  */
-async function fetchColumnSet(pool, schema, table) {
+const _columnCache = new Map() // key -> { set, at }
+const COLUMN_CACHE_TTL_MS = 60_000
+
+/**
+ * Krótki memo snapshotu stanów. Gdy włączone są OBA kanały (BaseLinker
+ * i Allegro), ich przebiegi SyncUp startują w tym samym interwale — bez tego
+ * pełny odczyt stanów z Wapro leciałby dwa razy w ciągu kilku sekund. TTL jest
+ * celowo krótki (sekundy): dedupuje bliskie w czasie przebiegi, a nie cały cykl.
+ */
+const _snapshotCache = new Map() // key -> { rows, at }
+const SNAPSHOT_CACHE_TTL_MS = 8_000
+
+/** Klucz cache — rozróżnia bazy, żeby nie mieszać schematów między klientami. */
+function dbCacheKey(dbSettings, schema, table) {
+  return `${dbSettings?.host || '?'}/${dbSettings?.database || '?'}::${schema}.${table}`
+}
+
+/** Czyści cache introspekcji i snapshotu (po zmianie ustawień bazy/schematu). */
+export function invalidateColumnCache() {
+  _columnCache.clear()
+  _snapshotCache.clear()
+}
+
+/**
+ * Zwraca zbiór (uppercase) nazw kolumn danej tabeli z INFORMATION_SCHEMA.
+ * Wynik jest cache'owany (TTL) — chyba że wymusimy odświeżenie (`force`).
+ */
+async function fetchColumnSet(pool, schema, table, { force = false, cacheKey = '' } = {}) {
+  if (!force && cacheKey) {
+    const hit = _columnCache.get(cacheKey)
+    if (hit && Date.now() - hit.at < COLUMN_CACHE_TTL_MS) return hit.set
+  }
+
   const res = await pool
     .request()
     .input('schema', schema)
@@ -28,48 +68,36 @@ async function fetchColumnSet(pool, schema, table) {
       FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
     `)
-  return new Set(res.recordset.map((r) => String(r.COLUMN_NAME).toUpperCase()))
+  const set = new Set(res.recordset.map((r) => String(r.COLUMN_NAME).toUpperCase()))
+  if (cacheKey) _columnCache.set(cacheKey, { set, at: Date.now() })
+  return set
 }
 
 /**
- * Wybiera pierwszą z kandydujących kolumn, która NAPRAWDĘ istnieje w tabeli.
- * Zwraca nazwę kolumny (tak jak podana w kandydatach) albo null.
+ * Buduje wyrażenie SKU z REALNIE istniejących kolumn indeksu.
+ * COALESCE po NULLIF radzi sobie, gdy część kartotek ma wypełniony tylko
+ * indeks katalogowy, a część tylko handlowy.
  */
-function pickExistingColumn(columnSet, candidates = []) {
-  for (const c of candidates) {
-    if (c && columnSet.has(String(c).toUpperCase())) return c
-  }
-  return null
+function buildSkuExpression(cols, alias = 'a') {
+  const exprs = cols.skuColumns.map(
+    (c) => `NULLIF(LTRIM(RTRIM(${alias}.${quoteIdent(c, 'kolumna SKU')})), '')`
+  )
+  return exprs.length === 1 ? exprs[0] : `COALESCE(${exprs.join(', ')})`
 }
 
 /**
- * Buduje wyrażenie wybierające pierwszy niepusty kandydat na SKU.
- * W Wapro część kartotek ma wypełniony tylko indeks katalogowy, część tylko
- * handlowy — COALESCE po NULLIF radzi sobie z obiema sytuacjami.
+ * Buduje wyrażenie ilości. Rezerwacja jest OPCJONALNA — gdy kolumny brak,
+ * podstawiamy literał `0` (efekt: rezerwacja = 0), więc wyrażenie jest zawsze
+ * poprawne, niezależnie od wersji Wapro.
  */
-function buildSkuExpression(map, alias = 'a') {
-  const cols = map.artykuly.skuColumns
-    .filter(Boolean)
-    .map((c) => `NULLIF(LTRIM(RTRIM(${alias}.${quoteIdent(c, 'kolumna SKU')})), '')`)
+function buildQuantityExpression(cols, { subtractReserved }, alias = 's') {
+  const stan = `CAST(${alias}.${quoteIdent(cols.quantity, 'kolumna stanu')} AS DECIMAL(18,4))`
 
-  if (cols.length === 0) {
-    throw new Error('Mapa schematu nie definiuje żadnej kolumny SKU.')
-  }
-  return cols.length === 1 ? cols[0] : `COALESCE(${cols.join(', ')})`
-}
+  if (!subtractReserved) return stan
 
-/**
- * Buduje wyrażenie ilości. Rezerwacje odejmujemy opcjonalnie — u części klientów
- * kolumna rezerwacji nie istnieje lub nie jest używana.
- */
-function buildQuantityExpression(map, { subtractReserved }, alias = 's') {
-  const stan = `${alias}.${quoteIdent(map.stany.quantity, 'kolumna stanu')}`
-
-  if (!subtractReserved || !map.stany.reserved) {
-    return `CAST(${stan} AS DECIMAL(18,4))`
-  }
-  const rez = `${alias}.${quoteIdent(map.stany.reserved, 'kolumna rezerwacji')}`
-  return `CAST(${stan} AS DECIMAL(18,4)) - CAST(ISNULL(${rez}, 0) AS DECIMAL(18,4))`
+  // cols.reserved === null → default '0'; inaczej odnośnik do realnej kolumny.
+  const rez = optionalColumnExpr(cols.reserved, { alias, defaultSql: '0' })
+  return `${stan} - CAST(ISNULL(${rez}, 0) AS DECIMAL(18,4))`
 }
 
 /**
@@ -93,52 +121,78 @@ export async function fetchStockSnapshot(dbSettings, options = {}) {
     schemaOverrides = {}
   } = options
 
+  // Memo snapshotu: gdy oba kanały odpytują w tym samym cyklu, DB czytamy raz.
+  const snapKey = `${dbCacheKey(dbSettings, '_', '_')}|${JSON.stringify({
+    warehouseIds,
+    subtractReserved,
+    skipArchived,
+    aggregateWarehouses,
+    schemaOverrides
+  })}`
+  const cachedSnap = _snapshotCache.get(snapKey)
+  if (cachedSnap && Date.now() - cachedSnap.at < SNAPSHOT_CACHE_TTL_MS) {
+    return cachedSnap.rows
+  }
+
   const map = mergeProfile(schemaOverrides)
   const pool = await getPool(dbSettings)
 
   const artykuly = sectionRef(map, 'artykuly')
   const stany = sectionRef(map, 'stany')
-
-  const skuExpr = buildSkuExpression(map, 'a')
-  const qtyExpr = buildQuantityExpression(map, { subtractReserved }, 's')
-
-  const colArtId = quoteIdent(map.artykuly.id, 'ID artykułu')
-  const colStanArt = quoteIdent(map.stany.articleId, 'ID artykułu w stanach')
-  const colStanMag = quoteIdent(map.stany.warehouseId, 'ID magazynu')
-  const colNazwa = quoteIdent(map.artykuly.name, 'nazwa artykułu')
-
-  // Kod kreskowy (EAN) — kolumna OPCJONALNA i zależna od wersji Wapro. Zanim
-  // wstawimy ją do zapytania, sprawdzamy w INFORMATION_SCHEMA, czy istnieje.
-  // Kolejność kandydatów: najpierw ta z mapy schematu, potem typowe warianty.
-  // Gdy żadnej nie ma — bezpiecznie zwracamy pusty string, nie wywalając SQL-a.
   const artSchema = sectionSchema(map, 'artykuly')
-  const artColumns = await fetchColumnSet(pool, artSchema, map.artykuly.table)
-  const barcodeCandidates = [
-    map.artykuly.barcode,
-    'PODSTAWOWY_KOD_KRESKOWY',
-    'KOD_KRESKOWY',
-    'KODKRESKOWY',
-    'EAN',
-    'KOD_EAN'
-  ]
-  const barcodeName = pickExistingColumn(artColumns, barcodeCandidates)
-  const barcodeCol = barcodeName
-    ? `a.${quoteIdent(barcodeName, 'kod kreskowy')}`
-    : `CAST('' AS NVARCHAR(1))`
-  if (!barcodeName) {
-    console.warn(
-      `[Wapro] Tabela ${artSchema}.${map.artykuly.table} nie ma kolumny kodu kreskowego ` +
-        `(sprawdzono: ${barcodeCandidates.filter(Boolean).join(', ')}). ` +
-        `Pole barcode = '' — dopasowanie ofert Allegro po EAN będzie ograniczone (zostają SKU i tytuł).`
+  const stanySchema = sectionSchema(map, 'stany')
+
+  // --- adaptacyjne rozwiązanie kolumn ------------------------------------
+  // Pobieramy realne kolumny obu tabel i dopasowujemy nazwy do tej instalacji
+  // Wapro. Kolumny opcjonalne (rezerwacja, archiwum, EAN), których brak,
+  // po prostu pomijamy — zamiast wywalać się na „Invalid column name".
+  const [artColumns, stanyColumns] = await Promise.all([
+    fetchColumnSet(pool, artSchema, map.artykuly.table, {
+      cacheKey: dbCacheKey(dbSettings, artSchema, map.artykuly.table)
+    }),
+    fetchColumnSet(pool, stanySchema, map.stany.table, {
+      cacheKey: dbCacheKey(dbSettings, stanySchema, map.stany.table)
+    })
+  ])
+
+  const cols = resolveStockColumns(map, artColumns, stanyColumns)
+  if (cols.missingRequired.length > 0) {
+    throw new Error(
+      `Wapro: w tabelach ${artSchema}.${map.artykuly.table} / ${stanySchema}.${map.stany.table} ` +
+        `nie znaleziono wymaganych kolumn: ${cols.missingRequired.join(', ')}. ` +
+        `Popraw mapowanie schematu (zakładka „Ustawienia Bazy”) lub wskaż właściwe tabele.`
     )
   }
+  if (cols.droppedOptional.length > 0) {
+    console.warn(
+      `[Wapro] Kolumny opcjonalne pominięte (brak w tej wersji Wapro): ${cols.droppedOptional.join(', ')}. ` +
+        (cols.reserved ? '' : 'Rezerwacje NIE są odejmowane. ') +
+        (cols.barcode ? '' : 'Dopasowanie ofert po EAN ograniczone (zostają SKU i tytuł).')
+    )
+  }
+
+  const skuExpr = buildSkuExpression(cols, 'a')
+  const qtyExpr = buildQuantityExpression(cols, { subtractReserved }, 's')
+
+  const colArtId = quoteIdent(cols.artId, 'ID artykułu')
+  const colStanArt = quoteIdent(cols.stanArticleId, 'ID artykułu w stanach')
+  const colStanMag = quoteIdent(cols.warehouseId, 'ID magazynu')
+  const colNazwa = quoteIdent(cols.name, 'nazwa artykułu')
+
+  // Kolumny OPCJONALNE → wyrażenie z domyślnym literałem, gdy kolumny brak.
+  // Kod kreskowy: '' zamiast kolumny; flaga archiwum: 0 (czyli „nie archiwalny”),
+  // więc filtr `= 0` przepuszcza wszystko, gdy kolumny nie ma.
+  const barcodeCol = optionalColumnExpr(cols.barcode, { alias: 'a', defaultSql: `CAST('' AS NVARCHAR(1))` })
+  const archivedExpr = `ISNULL(${optionalColumnExpr(cols.archived, { alias: 'a', defaultSql: '0' })}, 0)`
 
   // --- filtry -------------------------------------------------------------
   const where = [`${skuExpr} IS NOT NULL`]
   const request = pool.request()
 
-  if (skipArchived && map.artykuly.archivedFlag) {
-    where.push(`ISNULL(a.${quoteIdent(map.artykuly.archivedFlag, 'flaga archiwum')}, 0) = 0`)
+  if (skipArchived) {
+    // Gdy kolumny archiwum brak, archivedExpr == ISNULL(0,0) == 0 → warunek
+    // zawsze prawdziwy (wszystko widoczne). Zero odwołań do nieistniejącej kolumny.
+    where.push(`${archivedExpr} = 0`)
   }
 
   if (Array.isArray(warehouseIds) && warehouseIds.length > 0) {
@@ -184,7 +238,7 @@ export async function fetchStockSnapshot(dbSettings, options = {}) {
   try {
     const result = await request.query(query)
 
-    return result.recordset.map((row) => ({
+    const rows = result.recordset.map((row) => ({
       sku: String(row.sku).trim(),
       name: row.nazwa == null ? '' : String(row.nazwa).trim(),
       barcode: row.kod == null ? '' : String(row.kod).trim(),
@@ -193,8 +247,77 @@ export async function fetchStockSnapshot(dbSettings, options = {}) {
       quantity: Math.max(0, Math.floor(Number(row.ilosc) || 0)),
       warehouseId: row.id_magazynu == null ? null : Number(row.id_magazynu)
     }))
+
+    _snapshotCache.set(snapKey, { rows, at: Date.now() })
+    return rows
   } catch (err) {
     throw translateError(err)
+  }
+}
+
+/**
+ * Diagnostyka schematu stanów — „koło ratunkowe" dla GUI.
+ *
+ * Pokazuje, jak resolver rozwiązał każdą kolumnę: która realna kolumna została
+ * użyta, czy kolumna opcjonalna została znaleziona, czy zadziałał plastyczny
+ * fallback, oraz których kolumn WYMAGANYCH brakuje. Zawsze wymusza świeżą
+ * introspekcję (pomija cache), bo to jawne „wykryj ponownie".
+ *
+ * @returns {Promise<object>}
+ */
+export async function getStockSchemaDiagnostics(dbSettings, schemaOverrides = {}) {
+  const map = mergeProfile(schemaOverrides)
+  const pool = await getPool(dbSettings)
+
+  const artSchema = sectionSchema(map, 'artykuly')
+  const stanySchema = sectionSchema(map, 'stany')
+
+  const [artColumns, stanyColumns] = await Promise.all([
+    fetchColumnSet(pool, artSchema, map.artykuly.table, { force: true }),
+    fetchColumnSet(pool, stanySchema, map.stany.table, { force: true })
+  ])
+  // Odśwież też cache używany przez synchronizację, żeby był spójny z podglądem.
+  _columnCache.set(dbCacheKey(dbSettings, artSchema, map.artykuly.table), { set: artColumns, at: Date.now() })
+  _columnCache.set(dbCacheKey(dbSettings, stanySchema, map.stany.table), { set: stanyColumns, at: Date.now() })
+
+  const cols = resolveStockColumns(map, artColumns, stanyColumns)
+
+  const toField = (key, label, section, required, resolved, fallback) => {
+    const isArr = Array.isArray(resolved)
+    const found = isArr ? resolved.length > 0 : Boolean(resolved)
+    return {
+      key,
+      label,
+      section,
+      required,
+      resolved: isArr ? resolved.join(', ') : resolved || null,
+      found,
+      usedFallback: required ? false : !found,
+      fallback: fallback ?? null
+    }
+  }
+
+  const fields = [
+    toField('artId', 'ID artykułu', 'artykuly', true, cols.artId),
+    toField('name', 'Nazwa artykułu', 'artykuly', true, cols.name),
+    toField('sku', 'SKU / indeks', 'artykuly', true, cols.skuColumns),
+    toField('barcode', 'Kod kreskowy / EAN', 'artykuly', false, cols.barcode, "'' (pusty)"),
+    toField('archived', 'Flaga archiwum', 'artykuly', false, cols.archived, '0 (brak filtra — widać wszystko)'),
+    toField('stanArticleId', 'ID artykułu w stanach', 'stany', true, cols.stanArticleId),
+    toField('warehouseId', 'ID magazynu', 'stany', true, cols.warehouseId),
+    toField('quantity', 'Stan / ilość', 'stany', true, cols.quantity),
+    toField('reserved', 'Rezerwacja', 'stany', false, cols.reserved, '0 (nie odejmowana)')
+  ]
+
+  return {
+    ok: cols.missingRequired.length === 0,
+    tables: {
+      artykuly: { schema: artSchema, table: map.artykuly.table, columnCount: artColumns.size },
+      stany: { schema: stanySchema, table: map.stany.table, columnCount: stanyColumns.size }
+    },
+    fields,
+    missingRequired: cols.missingRequired,
+    droppedOptional: cols.droppedOptional
   }
 }
 

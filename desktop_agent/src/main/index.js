@@ -19,7 +19,12 @@ import {
   saveSyncSettings
 } from './store.js'
 import { closePool, initPool, testConnection } from './wapro/pool.js'
-import { fetchStockSnapshot, fetchWarehouses } from './wapro/inventoryRepository.js'
+import {
+  fetchStockSnapshot,
+  fetchWarehouses,
+  getStockSchemaDiagnostics,
+  invalidateColumnCache
+} from './wapro/inventoryRepository.js'
 import { discoverTables, introspectSchema } from './wapro/introspect.js'
 import {
   ensureStagingSchema,
@@ -213,8 +218,9 @@ function registerIpc() {
 
   handle(CH.SETTINGS_SAVE_DB, async (payload) => {
     const saved = saveDbSettings(payload || {})
-    // Zmiana parametrów unieważnia dotychczasowy pool.
+    // Zmiana parametrów unieważnia dotychczasowy pool i cache introspekcji.
     await closePool()
+    invalidateColumnCache()
     log('success', `Zapisano ustawienia bazy (${saved.host}/${saved.database}).`)
     return saved
   })
@@ -230,6 +236,8 @@ function registerIpc() {
 
   handle(CH.SETTINGS_SAVE_SCHEMA_MAP, async (payload) => {
     const saved = saveSchemaMap(payload || {})
+    // Nowe mapowanie może zmienić schemat/tabele → cache introspekcji nieaktualny.
+    invalidateColumnCache()
     log('success', 'Zapisano mapowanie schematu Wapro.')
     return saved
   })
@@ -258,6 +266,16 @@ function registerIpc() {
   handle(CH.DB_INTROSPECT, async () => {
     const report = await introspectSchema(getDbSettings(), getSchemaMap())
     log(report.ok ? 'success' : 'warn', `Introspekcja schematu: ${report.summary}`)
+    return report
+  })
+
+  handle(CH.DB_SCHEMA_DIAGNOSTICS, async () => {
+    const report = await getStockSchemaDiagnostics(getDbSettings(), getSchemaMap())
+    log(
+      report.ok ? 'success' : 'warn',
+      `Diagnostyka schematu: ${report.ok ? 'wszystkie wymagane kolumny znalezione' : `brakuje: ${report.missingRequired.join(', ')}`}` +
+        (report.droppedOptional.length ? ` (fallback dla: ${report.droppedOptional.join(', ')})` : '')
+    )
     return report
   })
 

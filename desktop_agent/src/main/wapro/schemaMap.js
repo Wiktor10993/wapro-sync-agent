@@ -67,6 +67,120 @@ export const PROFILES = {
   WFMAG_DEFAULT,
 };
 
+// ---------------------------------------------------------------------------
+// Adaptacyjne rozwiązywanie kolumn stanów (różne wersje Wapro / WF-Mag)
+// ---------------------------------------------------------------------------
+
+/**
+ * Kandydaci nazw kolumn per rola. Kolejność = priorytet. Do listy zawsze
+ * doklejamy najpierw nazwę z mapy schematu (jeśli podana), potem typowe
+ * warianty spotykane w różnych wydaniach Wapro Mag / WF-Mag.
+ *
+ * Dzięki temu, gdy u klienta brakuje np. `REZERWACJA`, zapytanie samo się do
+ * tego dostosuje (pominie odejmowanie rezerwacji) zamiast wywalać się na
+ * „Invalid column name". Kolumny WYMAGANE, których nie ma, zgłaszamy jako błąd
+ * konfiguracji — z czytelnym komunikatem, nie surowym SQL-em.
+ */
+export const STOCK_COLUMN_CANDIDATES = {
+  // ARTYKUŁY
+  artId: ['ID_ARTYKULU', 'ID_TOWARU', 'ID'],
+  name: ['NAZWA', 'NAZWA_TOWARU', 'NAZWA_PELNA', 'OPIS'],
+  barcode: ['PODSTAWOWY_KOD_KRESKOWY', 'KOD_KRESKOWY', 'KODKRESKOWY', 'EAN', 'KOD_EAN', 'KOD_PRODUCENTA'],
+  archived: ['ARCHIWALNY', 'ARCHIWUM', 'CZY_ARCHIWALNY', 'ZABLOKOWANY'],
+  sku: ['INDEKS_KATALOGOWY', 'INDEKS_HANDLOWY', 'INDEKS', 'SYMBOL', 'KOD', 'KOD_TOWARU'],
+  // STANY MAGAZYNOWE
+  stanArticleId: ['ID_ARTYKULU', 'ID_TOWARU'],
+  warehouseId: ['ID_MAGAZYNU', 'ID_MAG', 'MAGAZYN'],
+  quantity: ['STAN', 'ILOSC', 'STAN_MAGAZYNOWY', 'STAN_HANDLOWY', 'ILOSC_DOSTEPNA'],
+  reserved: ['REZERWACJA', 'REZERWACJE', 'STAN_REZERWACJI', 'ZAREZERWOWANO', 'ILOSC_REZ', 'ILOSC_ZAREZERWOWANA'],
+};
+
+/** Normalizuje wejście do Set<UPPERCASE>. Akceptuje Set, tablicę lub iterowalne. */
+function toUpperSet(columns) {
+  const out = new Set();
+  for (const c of columns || []) out.add(String(c).toUpperCase());
+  return out;
+}
+
+/** Pierwsza istniejąca kolumna z listy kandydatów (case-insensitive) albo null. */
+function firstExisting(upperSet, candidates = []) {
+  for (const c of candidates) {
+    if (c && upperSet.has(String(c).toUpperCase())) return c;
+  }
+  return null;
+}
+
+/** Wszystkie istniejące kolumny z listy (z zachowaniem kolejności, bez duplikatów). */
+function allExisting(upperSet, candidates = []) {
+  const seen = new Set();
+  const out = [];
+  for (const c of candidates) {
+    if (!c) continue;
+    const up = String(c).toUpperCase();
+    if (upperSet.has(up) && !seen.has(up)) {
+      seen.add(up);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * Na podstawie REALNYCH kolumn tabel `artykuly` i `stany` (z INFORMATION_SCHEMA)
+ * oraz mapy schematu ustala, których kolumn faktycznie użyć.
+ *
+ * @param {object} map          scalona mapa (mergeProfile)
+ * @param {Iterable<string>} artColumns   nazwy kolumn tabeli artykułów
+ * @param {Iterable<string>} stanyColumns nazwy kolumn tabeli stanów
+ * @returns {{
+ *   artId:string|null, name:string|null, barcode:string|null, archived:string|null,
+ *   skuColumns:string[], stanArticleId:string|null, warehouseId:string|null,
+ *   quantity:string|null, reserved:string|null, missingRequired:string[], droppedOptional:string[]
+ * }}
+ */
+export function resolveStockColumns(map, artColumns, stanyColumns) {
+  const A = toUpperSet(artColumns);
+  const S = toUpperSet(stanyColumns);
+  const C = STOCK_COLUMN_CANDIDATES;
+
+  // Do każdej roli: najpierw nazwa z mapy, potem domyślni kandydaci.
+  const withMapped = (mapped, defaults) => [
+    ...(Array.isArray(mapped) ? mapped : [mapped]).filter(Boolean),
+    ...defaults,
+  ];
+
+  const artId = firstExisting(A, withMapped(map.artykuly.id, C.artId));
+  const name = firstExisting(A, withMapped(map.artykuly.name, C.name));
+  const barcode = firstExisting(A, withMapped(map.artykuly.barcode, C.barcode));
+  const archived = firstExisting(A, withMapped(map.artykuly.archivedFlag, C.archived));
+  const skuColumns = allExisting(A, withMapped(map.artykuly.skuColumns, C.sku));
+
+  const stanArticleId = firstExisting(S, withMapped(map.stany.articleId, C.stanArticleId));
+  const warehouseId = firstExisting(S, withMapped(map.stany.warehouseId, C.warehouseId));
+  const quantity = firstExisting(S, withMapped(map.stany.quantity, C.quantity));
+  const reserved = firstExisting(S, withMapped(map.stany.reserved, C.reserved));
+
+  const missingRequired = [];
+  if (!artId) missingRequired.push('ID artykułu (ARTYKULY)');
+  if (!name) missingRequired.push('nazwa artykułu (ARTYKULY)');
+  if (skuColumns.length === 0) missingRequired.push('kolumna SKU/indeks (ARTYKULY)');
+  if (!stanArticleId) missingRequired.push('ID artykułu w stanach (STANY)');
+  if (!warehouseId) missingRequired.push('ID magazynu (STANY)');
+  if (!quantity) missingRequired.push('kolumna stanu/ilości (STANY)');
+
+  // Opcjonalne, których nie znaleziono — do logu (zmienia zachowanie, ale nie blokuje).
+  const droppedOptional = [];
+  if (!barcode) droppedOptional.push('kod kreskowy/EAN');
+  if (!archived) droppedOptional.push('flaga archiwum');
+  if (!reserved) droppedOptional.push('rezerwacja');
+
+  return {
+    artId, name, barcode, archived, skuColumns,
+    stanArticleId, warehouseId, quantity, reserved,
+    missingRequired, droppedOptional,
+  };
+}
+
 /** Regex bezpiecznego identyfikatora SQL Server. */
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_$#]{0,127}$/;
 
@@ -84,6 +198,25 @@ export function quoteIdent(name, label = 'identyfikator') {
 
 export function qualified(schema, table) {
   return `${quoteIdent(schema, 'schemat')}.${quoteIdent(table, 'tabela')}`;
+}
+
+/**
+ * Zwraca wyrażenie SQL dla kolumny OPCJONALNEJ:
+ *   - gdy kolumna istnieje  → bezpieczny, cytowany odnośnik `alias.[NAZWA]`,
+ *   - gdy kolumny brak       → literał domyślny (np. `0`, `''`).
+ *
+ * Dzięki temu zapytanie nigdy nie odwołuje się do nieistniejącej kolumny,
+ * a zestaw kolumn wynikowych jest ZAWSZE taki sam, niezależnie od wersji Wapro.
+ *
+ * @param {string|null} name        realna nazwa kolumny albo null
+ * @param {object} opts
+ * @param {string} [opts.alias]     alias tabeli (np. 'a' lub 's')
+ * @param {string} opts.defaultSql  literał SQL użyty, gdy kolumny brak
+ */
+export function optionalColumnExpr(name, { alias = '', defaultSql } = {}) {
+  if (!name) return defaultSql;
+  const ref = quoteIdent(name, 'kolumna');
+  return alias ? `${alias}.${ref}` : ref;
 }
 
 /**

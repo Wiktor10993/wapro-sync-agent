@@ -43,6 +43,7 @@ const api = {
   listWarehouses: () => invoke(CH.DB_WAREHOUSES),
   introspectSchema: () => invoke(CH.DB_INTROSPECT),
   discoverTables: () => invoke(CH.DB_DISCOVER_TABLES),
+  schemaDiagnostics: () => invoke(CH.DB_SCHEMA_DIAGNOSTICS),
   previewStock: (limit) => invoke(CH.DB_PREVIEW_STOCK, { limit }),
   stagingStatus: () => invoke(CH.DB_STAGING_STATUS),
   createStagingSchema: () => invoke(CH.DB_STAGING_CREATE),

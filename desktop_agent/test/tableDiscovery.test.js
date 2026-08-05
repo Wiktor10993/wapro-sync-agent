@@ -6,7 +6,9 @@ import {
   mergeProfile,
   sectionSchema,
   sectionRef,
-  requiredObjects
+  requiredObjects,
+  resolveStockColumns,
+  optionalColumnExpr
 } from '../src/main/wapro/schemaMap.js'
 
 describe('scoreTableForRole — dopasowanie po frazach', () => {
@@ -89,5 +91,86 @@ describe('schemat per sekcja (tabele rozproszone)', () => {
     const art = objs.find((o) => o.section === 'artykuly')
     assert.equal(art.schema, 'a')
     assert.equal(art.table, 'T_ART')
+  })
+})
+
+describe('resolveStockColumns — adaptacja do realnych kolumn Wapro', () => {
+  const map = mergeProfile()
+  // Typowy „pełny" zestaw kolumn.
+  const artFull = ['ID_ARTYKULU', 'NAZWA', 'INDEKS_KATALOGOWY', 'INDEKS_HANDLOWY', 'PODSTAWOWY_KOD_KRESKOWY', 'ARCHIWALNY']
+  const stanyFull = ['ID_ARTYKULU', 'ID_MAGAZYNU', 'STAN', 'REZERWACJA']
+
+  it('pełny schemat — wszystko rozwiązane, brak braków', () => {
+    const c = resolveStockColumns(map, artFull, stanyFull)
+    assert.equal(c.quantity, 'STAN')
+    assert.equal(c.reserved, 'REZERWACJA')
+    assert.deepEqual(c.missingRequired, [])
+  })
+
+  it('brak REZERWACJA — reserved=null, BEZ błędu (opcjonalna)', () => {
+    const c = resolveStockColumns(map, artFull, ['ID_ARTYKULU', 'ID_MAGAZYNU', 'STAN'])
+    assert.equal(c.reserved, null)
+    assert.equal(c.quantity, 'STAN')
+    assert.deepEqual(c.missingRequired, [])
+    assert.ok(c.droppedOptional.includes('rezerwacja'))
+  })
+
+  it('brak kolumny stanu — zgłoszone jako wymagane', () => {
+    const c = resolveStockColumns(map, artFull, ['ID_ARTYKULU', 'ID_MAGAZYNU'])
+    assert.equal(c.quantity, null)
+    assert.ok(c.missingRequired.some((m) => /stan|ilo/i.test(m)))
+  })
+
+  it('alternatywne nazwy: ILOSC zamiast STAN, EAN zamiast PODSTAWOWY_KOD_KRESKOWY', () => {
+    const c = resolveStockColumns(
+      map,
+      ['ID_TOWARU', 'NAZWA_TOWARU', 'SYMBOL', 'EAN'],
+      ['ID_TOWARU', 'ID_MAGAZYNU', 'ILOSC']
+    )
+    assert.equal(c.quantity, 'ILOSC')
+    assert.equal(c.barcode, 'EAN')
+    assert.equal(c.artId, 'ID_TOWARU')
+    assert.deepEqual(c.skuColumns, ['SYMBOL'])
+    assert.deepEqual(c.missingRequired, [])
+  })
+
+  it('honoruje nazwy z mapy schematu przed domyślnymi', () => {
+    const custom = mergeProfile({ stany: { quantity: 'STAN_WLASNY' } })
+    const c = resolveStockColumns(custom, artFull, ['ID_ARTYKULU', 'ID_MAGAZYNU', 'STAN_WLASNY', 'STAN'])
+    assert.equal(c.quantity, 'STAN_WLASNY')
+  })
+
+  it('brak jakiejkolwiek kolumny SKU — wymagane', () => {
+    const c = resolveStockColumns(map, ['ID_ARTYKULU', 'NAZWA'], stanyFull)
+    assert.equal(c.skuColumns.length, 0)
+    assert.ok(c.missingRequired.some((m) => /SKU|indeks/i.test(m)))
+  })
+})
+
+describe('optionalColumnExpr — plastyczne wyrażenia z fallbackiem', () => {
+  it('brak kolumny → literał domyślny', () => {
+    assert.equal(optionalColumnExpr(null, { alias: 'a', defaultSql: "CAST('' AS NVARCHAR(1))" }), "CAST('' AS NVARCHAR(1))")
+    assert.equal(optionalColumnExpr(null, { alias: 's', defaultSql: '0' }), '0')
+  })
+
+  it('kolumna istnieje → cytowany odnośnik z aliasem', () => {
+    assert.equal(optionalColumnExpr('EAN', { alias: 'a', defaultSql: "''" }), 'a.[EAN]')
+  })
+
+  it('kolumna bez aliasu', () => {
+    assert.equal(optionalColumnExpr('STAN', { defaultSql: '0' }), '[STAN]')
+  })
+
+  it('odrzuca wstrzyknięcie w nazwie kolumny', () => {
+    assert.throws(() => optionalColumnExpr('X]; DROP TABLE', { alias: 'a', defaultSql: '0' }), /Nieprawidłowy/)
+  })
+
+  it('zapewnia jednakowy kształt niezależnie od wersji Wapro', () => {
+    // Brak REZERWACJA/ARCHIWALNY/EAN — wszystkie sprowadzone do bezpiecznych literałów.
+    const map = mergeProfile()
+    const c = resolveStockColumns(map, ['ID_ARTYKULU', 'NAZWA', 'INDEKS_KATALOGOWY'], ['ID_ARTYKULU', 'ID_MAGAZYNU', 'STAN'])
+    assert.equal(optionalColumnExpr(c.reserved, { alias: 's', defaultSql: '0' }), '0')
+    assert.equal(optionalColumnExpr(c.archived, { alias: 'a', defaultSql: '0' }), '0')
+    assert.equal(optionalColumnExpr(c.barcode, { alias: 'a', defaultSql: "CAST('' AS NVARCHAR(1))" }), "CAST('' AS NVARCHAR(1))")
   })
 })

@@ -19,6 +19,7 @@ export const CH = {
   DB_WAREHOUSES: 'db:warehouses',
   DB_INTROSPECT: 'db:introspect',
   DB_DISCOVER_TABLES: 'db:discover-tables',
+  DB_SCHEMA_DIAGNOSTICS: 'db:schema-diagnostics',
   DB_PREVIEW_STOCK: 'db:preview-stock',
   DB_STAGING_STATUS: 'db:staging-status',
   DB_STAGING_CREATE: 'db:staging-create',
