@@ -45,10 +45,10 @@ describe('qualified', () => {
 })
 
 describe('mergeProfile', () => {
-  it('bez nadpisań zwraca profil domyślny', () => {
+  it('bez nadpisań zwraca realny profil WFMag (jednotabelowy ARTYKUL)', () => {
     const m = mergeProfile()
-    assert.equal(m.artykuly.table, 'ARTYKULY')
-    assert.equal(m.stany.table, 'STANY_MAGAZYNOWE')
+    assert.equal(m.artykuly.table, 'ARTYKUL')
+    assert.equal(m.stany.table, 'ARTYKUL')
     assert.equal(m.schema, 'dbo')
   })
 
@@ -68,32 +68,32 @@ describe('mergeProfile', () => {
 
   it('nie mutuje profilu domyślnego', () => {
     mergeProfile({ artykuly: { table: 'INNE' } })
-    assert.equal(WFMAG_DEFAULT.artykuly.table, 'ARTYKULY')
+    assert.equal(WFMAG_DEFAULT.artykuly.table, 'ARTYKUL')
   })
 })
 
 describe('requiredObjects', () => {
   const objects = requiredObjects(mergeProfile())
 
-  it('wskazuje trzy tabele potrzebne do SyncUp', () => {
-    assert.deepEqual(objects.map((o) => o.table), ['ARTYKULY', 'STANY_MAGAZYNOWE', 'MAGAZYNY'])
+  it('wskazuje tabele potrzebne do SyncUp (WFMag: ARTYKUL pełni rolę stanów)', () => {
+    assert.deepEqual(objects.map((o) => o.table), ['ARTYKUL', 'ARTYKUL', 'MAGAZYN'])
   })
 
   it('oznacza kolumny stanów jako wymagane', () => {
-    const stany = objects.find((o) => o.table === 'STANY_MAGAZYNOWE')
+    const stany = objects.find((o) => o.section === 'stany')
     assert.ok(stany.required.includes('STAN'))
     assert.ok(stany.required.includes('ID_MAGAZYNU'))
   })
 
-  it('rezerwacja jest opcjonalna', () => {
-    const stany = objects.find((o) => o.table === 'STANY_MAGAZYNOWE')
-    assert.ok(stany.columns.includes('REZERWACJA'))
-    assert.ok(!stany.required.includes('REZERWACJA'))
+  it('rezerwacja jest opcjonalna (WFMag: ZAREZERWOWANO)', () => {
+    const stany = objects.find((o) => o.section === 'stany')
+    assert.ok(stany.columns.includes('ZAREZERWOWANO'))
+    assert.ok(!stany.required.includes('ZAREZERWOWANO'))
   })
 
   it('pomija pola null w mapie', () => {
     const objects2 = requiredObjects(mergeProfile({ artykuly: { archivedFlag: null, typeColumn: null } }))
-    const art = objects2.find((o) => o.table === 'ARTYKULY')
+    const art = objects2.find((o) => o.section === 'artykuly')
     assert.ok(!art.columns.includes(null))
   })
 })

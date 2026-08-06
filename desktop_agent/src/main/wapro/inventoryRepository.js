@@ -171,8 +171,16 @@ export async function fetchStockSnapshot(dbSettings, options = {}) {
     )
   }
 
+  // Tryb JEDNOTABELOWY (realny WFMag): gdy artykuły i stany to ta sama tabela
+  // (ARTYKUL trzyma STAN/ZAREZERWOWANO/ID_MAGAZYNU), pomijamy JOIN i czytamy
+  // wszystko z jednego aliasu `a`. W przeciwnym razie klasyczny JOIN a↔s.
+  const singleTable =
+    artSchema.toUpperCase() === stanySchema.toUpperCase() &&
+    String(map.artykuly.table).toUpperCase() === String(map.stany.table).toUpperCase()
+  const stanAlias = singleTable ? 'a' : 's'
+
   const skuExpr = buildSkuExpression(cols, 'a')
-  const qtyExpr = buildQuantityExpression(cols, { subtractReserved }, 's')
+  const qtyExpr = buildQuantityExpression(cols, { subtractReserved }, stanAlias)
 
   const colArtId = quoteIdent(cols.artId, 'ID artykułu')
   const colStanArt = quoteIdent(cols.stanArticleId, 'ID artykułu w stanach')
@@ -202,10 +210,17 @@ export async function fetchStockSnapshot(dbSettings, options = {}) {
       request.input(p, sql.Int, Number(id))
       return `@${p}`
     })
-    where.push(`s.${colStanMag} IN (${params.join(', ')})`)
+    where.push(`${stanAlias}.${colStanMag} IN (${params.join(', ')})`)
   }
 
   const whereSql = where.join('\n      AND ')
+
+  // FROM: jednotabelowo (ARTYKUL) bez JOIN-a, albo klasyczny JOIN artykuły↔stany.
+  const fromClause = singleTable
+    ? `FROM ${artykuly} AS a`
+    : `FROM ${stany} AS s
+    INNER JOIN ${artykuly} AS a
+      ON a.${colArtId} = s.${colStanArt}`
 
   // --- zapytanie ----------------------------------------------------------
   const query = aggregateWarehouses
@@ -216,9 +231,7 @@ export async function fetchStockSnapshot(dbSettings, options = {}) {
       MAX(${barcodeCol})               AS kod,
       SUM(${qtyExpr})                  AS ilosc,
       NULL                             AS id_magazynu
-    FROM ${stany} AS s
-    INNER JOIN ${artykuly} AS a
-      ON a.${colArtId} = s.${colStanArt}
+    ${fromClause}
     WHERE ${whereSql}
     GROUP BY ${skuExpr}
     ORDER BY sku`
@@ -228,10 +241,8 @@ export async function fetchStockSnapshot(dbSettings, options = {}) {
       a.${colNazwa}       AS nazwa,
       ${barcodeCol}       AS kod,
       ${qtyExpr}          AS ilosc,
-      s.${colStanMag}     AS id_magazynu
-    FROM ${stany} AS s
-    INNER JOIN ${artykuly} AS a
-      ON a.${colArtId} = s.${colStanArt}
+      ${stanAlias}.${colStanMag}     AS id_magazynu
+    ${fromClause}
     WHERE ${whereSql}
     ORDER BY sku, id_magazynu`
 

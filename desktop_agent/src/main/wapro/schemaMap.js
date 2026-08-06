@@ -19,43 +19,49 @@
  * regexem — mapa pochodzi z konfiguracji, więc traktujemy ją jak dane wejściowe.
  */
 
-/** Domyślny profil dla WF-Mag / Wapro Mag. */
+/**
+ * Domyślny profil dla realnego WAPRO Mag / WF-Mag (potwierdzony ze schematu
+ * fizycznego bazy). WAŻNE: w realnym WFMag stan magazynowy jest trzymany
+ * BEZPOŚREDNIO w tabeli `ARTYKUL` (kolumny STAN, ZAREZERWOWANO, ID_MAGAZYNU) —
+ * dlatego sekcje `artykuly` i `stany` wskazują TĘ SAMĄ tabelę. Gdy obie sekcje
+ * wskazują jedną tabelę, zapytanie budujemy bez JOIN-a (tryb jednotabelowy).
+ */
 export const WFMAG_DEFAULT = {
-  name: 'WF-Mag / Wapro Mag (domyślny)',
+  name: 'WAPRO Mag / WF-Mag (realny schemat)',
   schema: 'dbo',
 
   artykuly: {
-    table: 'ARTYKULY',
+    table: 'ARTYKUL',
     id: 'ID_ARTYKULU',
     // Kandydaci na SKU — bierzemy pierwszy niepusty, w tej kolejności.
     skuColumns: ['INDEKS_KATALOGOWY', 'INDEKS_HANDLOWY'],
-    barcode: 'PODSTAWOWY_KOD_KRESKOWY',
+    barcode: 'KOD_KRESKOWY',
     name: 'NAZWA',
-    // Kolumna oznaczająca artykuł archiwalny (0/1). null = brak filtra.
-    archivedFlag: 'ARCHIWALNY',
-    // Kolumna typu artykułu (np. usługi wykluczamy z synchronizacji). null = brak.
-    typeColumn: 'TYP_ARTYKULU',
+    // W WFMag artykuł „wyłączony" oznacza kolumna ZABLOKOWANY (0/1).
+    archivedFlag: 'ZABLOKOWANY',
+    typeColumn: null,
     excludedTypes: [],
   },
 
+  // Ta sama tabela co artykuły — stan i rezerwacja są kolumnami ARTYKUL.
   stany: {
-    table: 'STANY_MAGAZYNOWE',
+    table: 'ARTYKUL',
     articleId: 'ID_ARTYKULU',
     warehouseId: 'ID_MAGAZYNU',
     quantity: 'STAN',
-    // Kolumna rezerwacji — odejmowana od stanu, jeśli włączone w ustawieniach.
-    reserved: 'REZERWACJA',
+    // Rezerwacja w WFMag to ZAREZERWOWANO (nie „REZERWACJA").
+    reserved: 'ZAREZERWOWANO',
   },
 
   magazyny: {
-    table: 'MAGAZYNY',
+    table: 'MAGAZYN',
     id: 'ID_MAGAZYNU',
     symbol: 'SYMBOL',
     name: 'NAZWA',
   },
 
   kontrahenci: {
-    table: 'KONTRAHENCI',
+    table: 'KONTRAHENT',
     id: 'ID_KONTRAHENTA',
     code: 'KOD',
     name: 'NAZWA',
@@ -82,17 +88,20 @@ export const PROFILES = {
  * konfiguracji — z czytelnym komunikatem, nie surowym SQL-em.
  */
 export const STOCK_COLUMN_CANDIDATES = {
-  // ARTYKUŁY
+  // ARTYKUŁY (realny WFMag: tabela ARTYKUL)
   artId: ['ID_ARTYKULU', 'ID_TOWARU', 'ID'],
   name: ['NAZWA', 'NAZWA_TOWARU', 'NAZWA_PELNA', 'OPIS'],
-  barcode: ['PODSTAWOWY_KOD_KRESKOWY', 'KOD_KRESKOWY', 'KODKRESKOWY', 'EAN', 'KOD_EAN', 'KOD_PRODUCENTA'],
-  archived: ['ARCHIWALNY', 'ARCHIWUM', 'CZY_ARCHIWALNY', 'ZABLOKOWANY'],
+  // WFMag: podstawowy EAN to ARTYKUL.KOD_KRESKOWY.
+  barcode: ['KOD_KRESKOWY', 'PODSTAWOWY_KOD_KRESKOWY', 'KODKRESKOWY', 'EAN', 'KOD_EAN', 'KOD_PRODUCENTA'],
+  // WFMag: artykuł wyłączony = ZABLOKOWANY.
+  archived: ['ZABLOKOWANY', 'ARCHIWALNY', 'ARCHIWUM', 'CZY_ARCHIWALNY'],
   sku: ['INDEKS_KATALOGOWY', 'INDEKS_HANDLOWY', 'INDEKS', 'SYMBOL', 'KOD', 'KOD_TOWARU'],
-  // STANY MAGAZYNOWE
+  // STANY (w WFMag te kolumny są w tej samej tabeli ARTYKUL)
   stanArticleId: ['ID_ARTYKULU', 'ID_TOWARU'],
   warehouseId: ['ID_MAGAZYNU', 'ID_MAG', 'MAGAZYN'],
   quantity: ['STAN', 'ILOSC', 'STAN_MAGAZYNOWY', 'STAN_HANDLOWY', 'ILOSC_DOSTEPNA'],
-  reserved: ['REZERWACJA', 'REZERWACJE', 'STAN_REZERWACJI', 'ZAREZERWOWANO', 'ILOSC_REZ', 'ILOSC_ZAREZERWOWANA'],
+  // WFMag: rezerwacja = ZAREZERWOWANO.
+  reserved: ['ZAREZERWOWANO', 'REZERWACJA', 'REZERWACJE', 'STAN_REZERWACJI', 'ILOSC_REZ', 'ILOSC_ZAREZERWOWANA'],
 };
 
 /** Normalizuje wejście do Set<UPPERCASE>. Akceptuje Set, tablicę lub iterowalne. */

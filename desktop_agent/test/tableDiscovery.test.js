@@ -145,6 +145,22 @@ describe('resolveStockColumns — adaptacja do realnych kolumn Wapro', () => {
     assert.equal(c.skuColumns.length, 0)
     assert.ok(c.missingRequired.some((m) => /SKU|indeks/i.test(m)))
   })
+
+  it('realny WFMag (jednotabelowy ARTYKUL) — wszystko rozwiązane z jednej tabeli', () => {
+    // W WFMag te same kolumny są i dla „artykuły", i dla „stany".
+    const artykul = [
+      'ID_ARTYKULU', 'ID_MAGAZYNU', 'STAN', 'ZAREZERWOWANO', 'NAZWA',
+      'INDEKS_KATALOGOWY', 'INDEKS_HANDLOWY', 'KOD_KRESKOWY', 'ZABLOKOWANY'
+    ]
+    const c = resolveStockColumns(mergeProfile(), artykul, artykul)
+    assert.deepEqual(c.missingRequired, [])
+    assert.equal(c.quantity, 'STAN')
+    assert.equal(c.reserved, 'ZAREZERWOWANO')
+    assert.equal(c.warehouseId, 'ID_MAGAZYNU')
+    assert.equal(c.barcode, 'KOD_KRESKOWY')
+    assert.equal(c.archived, 'ZABLOKOWANY')
+    assert.deepEqual(c.skuColumns, ['INDEKS_KATALOGOWY', 'INDEKS_HANDLOWY'])
+  })
 })
 
 describe('optionalColumnExpr — plastyczne wyrażenia z fallbackiem', () => {
