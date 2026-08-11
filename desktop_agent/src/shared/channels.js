@@ -52,6 +52,17 @@ export const CH = {
   SYNC_STOP_SCHEDULER: 'sync:stop-scheduler',
   SYNC_STATUS: 'sync:status',
   SYNC_RESET_CACHE: 'sync:reset-cache',
+  AUDIT_QUERY: 'audit:query',
+
+  // --- Action Center (Problemy / Wymaga uwagi) ---------------------------
+  AC_SCAN: 'ac:scan',
+  AC_SIMULATE_SALE: 'ac:simulate-sale',
+  AC_LIST_UNMAPPED: 'ac:list-unmapped',
+  AC_LIST_ERRORS: 'ac:list-errors',
+  AC_RESOLVE_MAPPING: 'ac:resolve-mapping',
+  AC_IGNORE_UNMAPPED: 'ac:ignore-unmapped',
+  AC_RETRY_ERROR: 'ac:retry-error',
+  AC_IGNORE_ERROR: 'ac:ignore-error',
 
   // --- system -------------------------------------------------------------
   APP_PICK_FOLDER: 'app:pick-folder',

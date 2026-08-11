@@ -97,6 +97,71 @@ async function setOfferStock(sandbox, token, offerId, quantity) {
   })
 }
 
+/**
+ * Surowa lista ofert w kształcie OfferCandidate — dla nowego silnika (orchestrator).
+ * @returns {Promise<Array<{offerId:string, sku:string, ean:string, name:string}>>}
+ */
+export async function listOffers(log = () => {}) {
+  const token = await getValidAccessToken(log)
+  const { allegro } = getIntegrations()
+  const sandbox = Boolean(allegro.sandbox)
+
+  const out = []
+  let offset = 0
+  let total = null
+  for (let page = 0; page < 200; page++) {
+    const data = await allegroApi(sandbox, token, `/sale/offers?limit=${OFFERS_PAGE_LIMIT}&offset=${offset}`)
+    const offers = data?.offers ?? []
+    if (total == null) total = Number(data?.totalCount ?? data?.count ?? 0) || null
+    if (offers.length === 0) break
+    for (const o of offers) {
+      out.push({
+        offerId: String(o?.id ?? ''),
+        sku: String(o?.external?.id ?? '').trim(),
+        ean: extractEanFromOffer(o),
+        name: String(o?.name ?? '')
+      })
+    }
+    offset += offers.length
+    if (offers.length < OFFERS_PAGE_LIMIT) break
+    if (total != null && offset >= total) break
+  }
+  return out
+}
+
+/**
+ * Ustawia stan JEDNEJ oferty i RZUCA surowym błędem Allegro przy niepowodzeniu
+ * (status/kod) — używane przez ChannelPort w Action Center, żeby błąd trafił do
+ * kolejki „Błędy synchronizacji", a nie zniknął.
+ */
+export async function setSingleOfferStock(offerId, quantity, log = () => {}) {
+  const token = await getValidAccessToken(log)
+  const { allegro } = getIntegrations()
+  await setOfferStock(Boolean(allegro.sandbox), token, offerId, quantity)
+}
+
+/**
+ * Ustawia stan wskazanych ofert (po offerId). Zwraca zbiór offerId, które
+ * faktycznie zaktualizowano — dla orchestratora (zatwierdzanie hashy).
+ * @returns {Promise<Set<string>>}
+ */
+export async function setOffersStock(items, log = () => {}) {
+  const token = await getValidAccessToken(log)
+  const { allegro } = getIntegrations()
+  const sandbox = Boolean(allegro.sandbox)
+
+  const updated = new Set()
+  for (const it of items ?? []) {
+    try {
+      await setOfferStock(sandbox, token, it.offerId, it.quantity)
+      updated.add(String(it.offerId))
+    } catch (err) {
+      log('warn', `Allegro: oferta ${it.offerId} — ${interpretAllegroError(err)}`)
+    }
+  }
+  return updated
+}
+
 /** Etykieta klucza dopasowania do logów. */
 const VIA_LABEL = { ean: 'EAN', sku: 'SKU', title: 'Tytuł' }
 

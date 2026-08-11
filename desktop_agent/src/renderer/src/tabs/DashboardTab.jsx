@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Badge, Row, formatDate, formatTime } from '../components/ui.jsx'
 
-export default function DashboardTab({ settings, logs, status, busy, run, onRefresh }) {
+export default function DashboardTab({ settings, logs, status, busy, run, onRefresh, onSyncSummary }) {
+  // Po ręcznej wysyłce pokazujemy modal podsumowania (jeśli backend zwrócił SyncSummary).
+  const showSummary = (data) => {
+    onRefresh()
+    if (data && typeof data.checked === 'number') onSyncSummary?.(data)
+  }
   const logRef = useRef(null)
   const [preview, setPreview] = useState(null)
 
@@ -85,7 +90,7 @@ export default function DashboardTab({ settings, logs, status, busy, run, onRefr
             type="button"
             className="btn btn--primary"
             disabled={busy === 'up' || !dbConfigured}
-            onClick={() => run('up', () => window.agent.runSyncUp()).then(onRefresh)}
+            onClick={() => run('up', () => window.agent.runSyncUp()).then(showSummary)}
           >
             {busy === 'up' ? 'Wysyłam…' : 'Wyślij stany na BaseLinker'}
           </button>
@@ -94,7 +99,7 @@ export default function DashboardTab({ settings, logs, status, busy, run, onRefr
             className="btn btn--primary"
             disabled={busy === 'up-allegro' || !dbConfigured || !allegroAuthorized}
             title={!allegroAuthorized ? 'Najpierw połącz konto Allegro (zakładka Integracje API).' : undefined}
-            onClick={() => run('up-allegro', () => window.agent.runAllegroSyncUp()).then(onRefresh)}
+            onClick={() => run('up-allegro', () => window.agent.runAllegroSyncUp()).then(showSummary)}
           >
             {busy === 'up-allegro' ? 'Wysyłam…' : 'Wyślij stany na Allegro'}
           </button>

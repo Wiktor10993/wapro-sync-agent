@@ -78,6 +78,17 @@ const api = {
   stopScheduler: () => invoke(CH.SYNC_STOP_SCHEDULER),
   getStatus: () => invoke(CH.SYNC_STATUS),
   resetCache: () => invoke(CH.SYNC_RESET_CACHE),
+  queryAuditLog: (filter) => invoke(CH.AUDIT_QUERY, filter),
+
+  // --- Action Center ------------------------------------------------------
+  acScan: () => invoke(CH.AC_SCAN),
+  acSimulateSale: (channel, event) => invoke(CH.AC_SIMULATE_SALE, { channel, event }),
+  acListUnmapped: () => invoke(CH.AC_LIST_UNMAPPED),
+  acListErrors: () => invoke(CH.AC_LIST_ERRORS),
+  acResolveMapping: (input) => invoke(CH.AC_RESOLVE_MAPPING, input),
+  acIgnoreUnmapped: (id) => invoke(CH.AC_IGNORE_UNMAPPED, { id }),
+  acRetryError: (id) => invoke(CH.AC_RETRY_ERROR, { id }),
+  acIgnoreError: (id) => invoke(CH.AC_IGNORE_ERROR, { id }),
 
   // --- system -------------------------------------------------------------
   pickFolder: () => invoke(CH.APP_PICK_FOLDER),

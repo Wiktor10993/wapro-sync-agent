@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
+import './sync-modal.css'
 
 import { StatusPill } from './components/ui.jsx'
 import DashboardTab from './tabs/DashboardTab.jsx'
@@ -7,7 +8,20 @@ import DatabaseTab from './tabs/DatabaseTab.jsx'
 import IntegrationsTab from './tabs/IntegrationsTab.jsx'
 import SyncTab from './tabs/SyncTab.jsx'
 import OrdersTab from './tabs/OrdersTab.jsx'
+import ProblemyTab from './tabs/ProblemyTab.jsx'
 import AppTab from './tabs/AppTab.jsx'
+import AuditLogTab from './components/AuditLogTab.jsx'
+import SyncSummaryModal from './components/SyncSummaryModal.jsx'
+
+/** Zakładka „Dziennik" — opakowuje AuditLogTab i podpina IPC (rozpakowanie {ok,data}). */
+function DziennikTab() {
+  const queryLogs = useCallback(async (filter) => {
+    const r = await window.agent.queryAuditLog(filter)
+    if (!r.ok) throw new Error(r.error)
+    return r.data
+  }, [])
+  return <AuditLogTab queryLogs={queryLogs} />
+}
 
 /**
  * Powłoka aplikacji: zakładki, wspólny stan ustawień, subskrypcje IPC.
@@ -22,6 +36,8 @@ const TABS = [
   { id: 'integrations', label: 'Integracje API', Component: IntegrationsTab },
   { id: 'sync', label: 'Synchronizacja', Component: SyncTab },
   { id: 'orders', label: 'Zamówienia', Component: OrdersTab },
+  { id: 'problems', label: 'Problemy', Component: ProblemyTab },
+  { id: 'log', label: 'Dziennik', Component: DziennikTab },
   { id: 'app', label: 'Aplikacja', Component: AppTab }
 ]
 
@@ -32,6 +48,7 @@ export default function App() {
   const [status, setStatus] = useState({ schedulerRunning: false })
   const [banner, setBanner] = useState(null)
   const [busy, setBusy] = useState(null)
+  const [syncSummary, setSyncSummary] = useState(null)
 
   const notify = useCallback((type, text) => {
     setBanner({ type, text })
@@ -151,8 +168,11 @@ export default function App() {
           run={run}
           onSaved={refreshSettings}
           onRefresh={refreshSettings}
+          onSyncSummary={setSyncSummary}
         />
       </main>
+
+      <SyncSummaryModal summary={syncSummary} onClose={() => setSyncSummary(null)} />
     </div>
   )
 }

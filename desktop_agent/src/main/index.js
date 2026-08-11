@@ -52,6 +52,8 @@ import {
   runSyncUp
 } from './services/syncService.js'
 import { isSchedulerRunning, startScheduler, stopScheduler } from './services/scheduler.js'
+import { ensureAuditSchema, queryAuditLog } from './services/syncEngine.js'
+import * as actionCenter from './services/actionCenter.js'
 import { closeLogger, getLogDirectory, writeLogLine } from './services/fileLogger.js'
 import { createTray, destroyTray, getAutoStart, setAutoStart, updateTrayMenu } from './services/tray.js'
 
@@ -159,7 +161,8 @@ function createWindow(startHidden = false) {
   })
 
   mainWindow.on('ready-to-show', () => {
-    if (!startHidden) mainWindow.show()
+    // W trybie dev pokazujemy zawsze (ignorujemy ewentualny zapisany „startMinimized").
+    if (!startHidden || isDev) mainWindow.show()
   })
 
   // Zamknięcie krzyżykiem chowa do traya — agent musi działać dalej.
@@ -183,6 +186,18 @@ function createWindow(startHidden = false) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+  }
+
+  // W trybie deweloperskim otwieramy DevTools (odczepione) — ale w try/catch,
+  // żeby ewentualny błąd DevTools NIGDY nie zablokował pokazania okna.
+  if (isDev) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      try {
+        mainWindow.webContents.openDevTools({ mode: 'detach' })
+      } catch (err) {
+        console.warn('[main] openDevTools:', err?.message ?? err)
+      }
+    })
   }
 }
 
@@ -452,6 +467,22 @@ function registerIpc() {
     return { ok: true }
   })
 
+  // --- dziennik synchronizacji (INTEG_LOG_SYNC) --------------------------
+  handle(CH.AUDIT_QUERY, async (filter = {}) => queryAuditLog(filter))
+
+  // --- Action Center (Problemy / Wymaga uwagi) ---------------------------
+  handle(CH.AC_SCAN, async () => actionCenter.scanWapro())
+  handle(CH.AC_SIMULATE_SALE, async ({ channel, event } = {}) => actionCenter.simulateSale(channel, event || {}))
+  handle(CH.AC_LIST_UNMAPPED, async () => actionCenter.listUnmapped())
+  handle(CH.AC_LIST_ERRORS, async () => actionCenter.listErrors())
+  handle(CH.AC_RESOLVE_MAPPING, async (input = {}) => {
+    await actionCenter.resolveMapping(input)
+    return { ok: true }
+  })
+  handle(CH.AC_IGNORE_UNMAPPED, async ({ id } = {}) => actionCenter.ignoreUnmapped(id))
+  handle(CH.AC_RETRY_ERROR, async ({ id } = {}) => actionCenter.retryError(id))
+  handle(CH.AC_IGNORE_ERROR, async ({ id } = {}) => actionCenter.ignoreError(id))
+
   // --- system ------------------------------------------------------------
   handle(CH.APP_PICK_FOLDER, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -521,16 +552,29 @@ if (gotLock) {
     // okna dialogowe, menu kontekstowe), żeby nie odcinały się od aplikacji.
     nativeTheme.themeSource = 'dark'
 
-    registerIpc()
-    createTray(trayHandlers)
+    try {
+      registerIpc()
+      actionCenter.setActionCenterLogger(log)
+    } catch (err) {
+      console.error('[main] Błąd rejestracji IPC:', err)
+    }
 
-    // Start z autostartu (--hidden) nie powinien wyskakiwać oknem na pulpit.
-    const startHidden =
-      process.argv.includes('--hidden') || getAppearance().startMinimized
-
-    createWindow(startHidden)
+    // OKNO NAJPIERW — żeby pojawiło się nawet gdyby tray/baza zawiodły.
+    const startHidden = process.argv.includes('--hidden') || getAppearance().startMinimized
+    try {
+      createWindow(startHidden)
+    } catch (err) {
+      console.error('[main] Błąd tworzenia okna:', err)
+    }
 
     log('info', `Agent uruchomiony (v${app.getVersion()}, ${process.platform}, Electron ${process.versions.electron}).`)
+
+    // Tray dopiero po oknie i w try/catch (na macOS potrafi rzucić na złej ikonie).
+    try {
+      createTray(trayHandlers)
+    } catch (err) {
+      log('warn', `Nie udało się utworzyć ikony w zasobniku: ${err.message}`)
+    }
 
     // Wstępne nawiązanie połączenia z bazą — nie blokuje startu GUI,
     // ale od razu pokazuje w logu, czy dane logowania są poprawne.
@@ -538,6 +582,13 @@ if (gotLock) {
       await initPool(getDbSettings(), log)
     } catch (err) {
       log('warn', `Inicjalizacja puli MSSQL: ${err.message}`)
+    }
+
+    // Dziennik integracji — zakładamy schemat, jeśli baza dostępna (leniwie i tak powstanie).
+    try {
+      await ensureAuditSchema()
+    } catch (err) {
+      log('warn', `Dziennik INTEG_LOG_SYNC nie został jeszcze założony: ${err.message}`)
     }
 
     try {

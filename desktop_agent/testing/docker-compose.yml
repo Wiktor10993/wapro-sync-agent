@@ -1,0 +1,27 @@
+# Lokalny SQL Server pod testy integratora Wapro — Apple Silicon (arm64).
+#
+# azure-sql-edge ma natywny obraz arm64, więc rusza na M1/M2/M3 bez emulacji.
+# (Fallback dla pełnego SQL Servera opisany w TEST_LOCAL.md — przez Rosetta/amd64.)
+services:
+  wapro-db:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    platform: linux/arm64/v8
+    container_name: wapro-mssql-test
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "1"
+      # Hasło MUSI spełniać politykę złożoności MSSQL (duże/małe/cyfra/znak).
+      MSSQL_SA_PASSWORD: "Wapro_Test_123!"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - wapro_data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  wapro_data:

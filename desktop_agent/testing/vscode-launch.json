@@ -1,0 +1,41 @@
+// Skopiuj ten plik do  .vscode/launch.json  (w katalogu desktop_agent).
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: Electron Main (proces główny + synchronizacja)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/electron-vite",
+      "runtimeArgs": ["dev", "--sourcemap"],
+      "console": "integratedTerminal",
+      "env": {
+        "WAPRO_DEBUG": "1",
+        "ELECTRON_ENABLE_LOGGING": "1"
+      },
+      "sourceMaps": true,
+      "outFiles": ["${workspaceFolder}/out/**/*.js"],
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Debug: Seed bazy testowej (seed.mjs)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "program": "${workspaceFolder}/testing/seed.mjs",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/testing/.env"
+    },
+    {
+      "name": "Debug: Testy silnika (Vitest)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/vitest",
+      "runtimeArgs": ["run", "src/sync-engine"],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}

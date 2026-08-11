@@ -1,6 +1,6 @@
 {
   "name": "wapro-sync-agent",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
   "description": "Lokalny agent synchronizacji Wapro Mag ⇄ Allegro / BaseLinker (stany i zamówienia).",
   "author": {
@@ -17,20 +17,33 @@
     "build": "electron-vite build && electron-builder",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:win": "electron-vite build && electron-builder --win",
-    "build:dir": "electron-vite build && electron-builder --dir"
+    "build:dir": "electron-vite build && electron-builder --dir",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:up": "docker compose -f testing/docker-compose.yml up -d",
+    "db:down": "docker compose -f testing/docker-compose.yml down",
+    "db:seed": "node testing/seed.mjs"
   },
   "dependencies": {
+    "better-sqlite3": "^11.3.0",
     "electron-store": "^8.2.0",
     "mssql": "9.3.2",
     "node-cron": "^3.0.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/mssql": "^9.1.5",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^28.2.0",
     "electron-builder": "^24.9.0",
     "electron-vite": "^2.3.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
   },
   "build": {
     "appId": "pl.integracja.waproagent",

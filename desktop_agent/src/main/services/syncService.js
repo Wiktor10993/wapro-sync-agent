@@ -8,6 +8,7 @@ import { ensureStagingSchema, writeOrderToStaging } from '../wapro/orderReposito
 import { reflectBufferToXml } from '../wapro/bufferReflector.js'
 import * as blApi from './baselinkerApi.js'
 import * as allegroSync from './allegroSync.js'
+import * as syncEngine from './syncEngine.js'
 import {
   getAllegroStockHashes,
   getDbSettings,
@@ -129,34 +130,48 @@ async function runStockSyncUp(target, log = () => {}) {
   }
 }
 
-/** Wysyłka stanów na BaseLinker. */
+/**
+ * Wysyłka stanów na BaseLinker — przez NOWY silnik (orchestrator):
+ * delta-sync + matcher (EAN→SKU→nazwa + próg) + batching/retry + loop guard + audyt.
+ * Zwraca `SyncSummary` do modala w UI. Zachowujemy flagę `running` dla SYNC_STATUS.
+ */
 export async function runSyncUp(log = () => {}) {
-  return runStockSyncUp(
-    {
-      name: 'BaseLinker',
-      runningKey: 'up',
-      markKey: 'up',
-      getHashes: getStockHashes,
-      setHashes: setStockHashes,
-      update: (rows, l) => blApi.updateStockBySku(rows, l)
-    },
-    log
-  )
+  if (running.up) {
+    log('warn', 'BaseLinker SyncUp już trwa — pomijam.')
+    return { skipped: true }
+  }
+  running.up = true
+  try {
+    const summary = await syncEngine.runBaselinkerSync(log)
+    markSync('up')
+    log('success', `BaseLinker: sprawdzono ${summary.checked}, zmieniono ${summary.changed}, do weryfikacji ${summary.needsReview}, błędy ${summary.errors}.`)
+    return summary
+  } catch (err) {
+    log('error', `BaseLinker SyncUp nie powiódł się: ${err.message}`)
+    throw err
+  } finally {
+    running.up = false
+  }
 }
 
-/** Wysyłka stanów bezpośrednio na Allegro (własna pamięć hashy). */
+/** Wysyłka stanów na Allegro — przez nowy silnik (własna pamięć hashy). */
 export async function runAllegroSyncUp(log = () => {}) {
-  return runStockSyncUp(
-    {
-      name: 'Allegro',
-      runningKey: 'upAllegro',
-      markKey: 'upAllegro',
-      getHashes: getAllegroStockHashes,
-      setHashes: setAllegroStockHashes,
-      update: (rows, l) => allegroSync.updateOfferStockByCode(rows, l)
-    },
-    log
-  )
+  if (running.upAllegro) {
+    log('warn', 'Allegro SyncUp już trwa — pomijam.')
+    return { skipped: true }
+  }
+  running.upAllegro = true
+  try {
+    const summary = await syncEngine.runAllegroSync(log)
+    markSync('upAllegro')
+    log('success', `Allegro: sprawdzono ${summary.checked}, zmieniono ${summary.changed}, do weryfikacji ${summary.needsReview}, błędy ${summary.errors}.`)
+    return summary
+  } catch (err) {
+    log('error', `Allegro SyncUp nie powiódł się: ${err.message}`)
+    throw err
+  } finally {
+    running.upAllegro = false
+  }
 }
 
 // ===========================================================================
