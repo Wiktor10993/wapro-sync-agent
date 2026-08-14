@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
 import './sync-modal.css'
+import './action-center.css'
 
 import { StatusPill } from './components/ui.jsx'
 import DashboardTab from './tabs/DashboardTab.jsx'

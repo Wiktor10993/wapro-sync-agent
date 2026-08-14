@@ -54,6 +54,9 @@ export interface UnmappedItem {
   status: QueueStatus
 }
 
+/** Kategoria wpisu: krytyczny błąd vs „0 na stanie (Archiwum)" (informacyjny). */
+export type ErrorCategory = 'error' | 'archived_zero'
+
 export interface SyncError {
   id: number
   channel: Channel | 'wapro'
@@ -64,6 +67,7 @@ export interface SyncError {
   targetQuantity: number
   errorCode: string
   errorMessage: string
+  category: ErrorCategory
   attempts: number
   createdAt: string
   lastAttemptAt: string
@@ -123,6 +127,7 @@ CREATE TABLE IF NOT EXISTS sync_errors (
   target_qty    INTEGER NOT NULL DEFAULT 0,
   error_code    TEXT NOT NULL DEFAULT '',
   error_message TEXT NOT NULL DEFAULT '',
+  category      TEXT NOT NULL DEFAULT 'error',
   attempts      INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   last_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -144,6 +149,15 @@ export class LocalDatabase {
   constructor(filePath: string) {
     this.db = new Database(filePath)
     this.db.exec(SCHEMA)
+    this.migrate()
+  }
+
+  /** Lekka migracja dla istniejących baz (dokłada brakujące kolumny). */
+  private migrate(): void {
+    const cols = this.db.prepare('PRAGMA table_info(sync_errors)').all() as Array<{ name: string }>
+    if (!cols.some((c) => c.name === 'category')) {
+      this.db.exec("ALTER TABLE sync_errors ADD COLUMN category TEXT NOT NULL DEFAULT 'error'")
+    }
   }
 
   close(): void {
@@ -237,20 +251,21 @@ export class LocalDatabase {
 
   // --- sync errors (Kategoria II) ----------------------------------------
   enqueueError(e: Omit<SyncError, 'id' | 'attempts' | 'createdAt' | 'lastAttemptAt' | 'status'>): number {
+    const category = e.category ?? 'error'
     const existing = this.db
       .prepare(`SELECT id, attempts FROM sync_errors WHERE sku = ? AND channel = ? AND status = 'open'`)
       .get(e.sku, e.channel) as any
     if (existing) {
-      this.db.prepare(`UPDATE sync_errors SET target_qty=?, error_code=?, error_message=?, offer_id=?, attempts=attempts+1, last_attempt_at=datetime('now') WHERE id=?`)
-        .run(e.targetQuantity, e.errorCode, e.errorMessage, e.offerId, existing.id)
+      this.db.prepare(`UPDATE sync_errors SET target_qty=?, error_code=?, error_message=?, offer_id=?, category=?, attempts=attempts+1, last_attempt_at=datetime('now') WHERE id=?`)
+        .run(e.targetQuantity, e.errorCode, e.errorMessage, e.offerId, category, existing.id)
       return existing.id
     }
     const info = this.db
       .prepare(
-        `INSERT INTO sync_errors (channel, sku, ean, offer_id, direction, target_qty, error_code, error_message)
-         VALUES (@channel, @sku, @ean, @offerId, @direction, @targetQuantity, @errorCode, @errorMessage)`
+        `INSERT INTO sync_errors (channel, sku, ean, offer_id, direction, target_qty, error_code, error_message, category)
+         VALUES (@channel, @sku, @ean, @offerId, @direction, @targetQuantity, @errorCode, @errorMessage, @category)`
       )
-      .run({ channel: e.channel, sku: e.sku, ean: e.ean, offerId: e.offerId ?? null, direction: e.direction, targetQuantity: e.targetQuantity, errorCode: e.errorCode, errorMessage: e.errorMessage })
+      .run({ channel: e.channel, sku: e.sku, ean: e.ean, offerId: e.offerId ?? null, direction: e.direction, targetQuantity: e.targetQuantity, errorCode: e.errorCode, errorMessage: e.errorMessage, category })
     return Number(info.lastInsertRowid)
   }
 
@@ -300,5 +315,5 @@ function mapUnmapped(r: any): UnmappedItem {
   return { id: r.id, source: r.source, channel: r.channel ?? null, sku: r.sku, ean: r.ean, name: r.name, quantity: r.quantity, reason: r.reason, candidates, createdAt: r.created_at, status: r.status }
 }
 function mapError(r: any): SyncError {
-  return { id: r.id, channel: r.channel, sku: r.sku, ean: r.ean, offerId: r.offer_id ?? null, direction: r.direction, targetQuantity: r.target_qty, errorCode: r.error_code, errorMessage: r.error_message, attempts: r.attempts, createdAt: r.created_at, lastAttemptAt: r.last_attempt_at, status: r.status }
+  return { id: r.id, channel: r.channel, sku: r.sku, ean: r.ean, offerId: r.offer_id ?? null, direction: r.direction, targetQuantity: r.target_qty, errorCode: r.error_code, errorMessage: r.error_message, category: r.category ?? 'error', attempts: r.attempts, createdAt: r.created_at, lastAttemptAt: r.last_attempt_at, status: r.status }
 }

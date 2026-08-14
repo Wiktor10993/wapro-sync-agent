@@ -63,7 +63,7 @@ export default function ProblemyTab() {
         </p>
         <div className="button-row">
           <button type="button" className="btn btn--primary" onClick={scan} disabled={busy}>
-            {busy ? 'Pracuję…' : 'Skanuj WAPRO (scenariusz C)'}
+            {busy ? <><span className="spinner" aria-hidden="true" /> Skanuję WAPRO…</> : 'Skanuj WAPRO (scenariusz C)'}
           </button>
         </div>
         <div className="field-row field-row--tight" style={{ marginTop: 10 }}>

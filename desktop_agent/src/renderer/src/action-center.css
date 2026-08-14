@@ -1,0 +1,163 @@
+/* Action Center — czytelny, responsywny układ mapowania + spinner + przejścia. */
+
+/* Podzakładki */
+.tabs--sub {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0 16px;
+  flex-wrap: wrap;
+}
+.tabs--sub .tabs__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Karta pojedynczej pozycji do zmapowania */
+.ac-card {
+  border: 1px solid var(--border, #2a3542);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 12px;
+  background: var(--bg-elev, #161d26);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+}
+.ac-card:hover {
+  border-color: #3a4757;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.25);
+}
+
+.ac-card__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.ac-card__name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.ac-card__meta {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--text-dim, #9aa8b8);
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.ac-card__reason {
+  margin: 10px 0 14px;
+  font-size: 13px;
+  color: var(--text-dim, #9aa8b8);
+}
+
+/* Chipy kandydatów z Fuzzy Matchingu */
+.ac-chips {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* Formularz mapowania — pola z etykietami nad polem, responsywny wrap */
+.ac-map {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border, #2a3542);
+}
+.ac-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 150px;
+}
+.ac-field--grow {
+  flex: 1 1 280px;
+}
+.ac-field > label {
+  font-size: 12px;
+  color: var(--text-dim, #9aa8b8);
+  font-weight: 500;
+}
+.ac-field input,
+.ac-field select {
+  width: 100%;
+  box-sizing: border-box;
+}
+.ac-field input {
+  font-variant-numeric: tabular-nums;
+}
+.ac-map__actions {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding-bottom: 1px;
+}
+
+/* Spinner */
+.spinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--accent, #14b8a6);
+  border-radius: 50%;
+  animation: ac-spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+.spinner--lg {
+  width: 28px;
+  height: 28px;
+  border-width: 3px;
+}
+.ac-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 34px 0;
+  color: var(--text-dim, #9aa8b8);
+}
+@keyframes ac-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Delikatne wejście listy */
+.ac-fade-in {
+  animation: ac-fade 0.18s ease both;
+}
+@keyframes ac-fade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tag--muted {
+  background: rgba(154, 168, 184, 0.15);
+  color: var(--text-dim, #9aa8b8);
+}
+
+@media (max-width: 720px) {
+  .ac-map {
+    align-items: stretch;
+  }
+  .ac-map__actions {
+    width: 100%;
+  }
+  .ac-map__actions .btn {
+    flex: 1;
+  }
+}

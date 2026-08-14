@@ -74,7 +74,10 @@ const MOCK_OFFERS = [
   // Wobler — dopasowanie po SKU (INDEKS).
   { offerId: 'OFF-WOB', sku: 'SAL-PER-08F', ean: '', name: 'Wobler Salmo Perch 8cm Floating' },
   // Kulki — bez SKU/EAN w ofercie → dopasowanie po NAZWIE (Fuzzy).
-  { offerId: 'OFF-KP16', sku: '', ean: '', name: 'Kulki Proteinowe Truskawka 16mm 1kg' }
+  { offerId: 'OFF-KP16', sku: '', ean: '', name: 'Kulki Proteinowe Truskawka 16mm 1kg' },
+  // Oferta wycofana — pasuje po EAN, ale API zawsze zwraca 404 „nie znaleziono".
+  // Towar ma 0 szt. → kategoria „0 na stanie (Archiwum)", nie krytyczny błąd.
+  { offerId: 'OFF-GONE', sku: '', ean: '5905000000055', name: 'Wobler Wycofany 6cm' }
   // (Podbierak PDB-X nie ma oferty → „Niezmapowany produkt".)
 ]
 
@@ -88,6 +91,14 @@ function mockChannelPort(channel) {
       return MOCK_OFFERS.map((o) => ({ ...o }))
     },
     async pushQuantity(offerId, _variantId, quantity) {
+      // Oferta wycofana — zawsze 404 (przy stanie 0 → „Archiwum", nie błąd krytyczny).
+      if (offerId === 'OFF-GONE') {
+        const e = new Error('Nie znaleziono oferty (404) — oferta wycofana/zarchiwizowana')
+        e.code = 'ERROR_OFFER_NOT_FOUND'
+        e.status = 404
+        throw e
+      }
+      // Zarchiwizowana z niezerowym stanem — realny błąd, ale Retry go naprawia.
       if (offerId === 'OFF-FEEDER' && !failedOnce.has(offerId)) {
         failedOnce.add(offerId)
         const e = new Error('Oferta zarchiwizowana (400)')

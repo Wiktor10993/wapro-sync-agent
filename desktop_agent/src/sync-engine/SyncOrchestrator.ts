@@ -17,6 +17,19 @@ import type { OfferCandidate } from './types'
 import { buildOfferIndex, matchProduct, type OfferIndex, type MatcherOptions } from './matching/productMatcher'
 import type { LocalDatabase, Channel, Origin, LocalProduct } from './state/localDb'
 
+/** Oddaje kontrolę pętli zdarzeń — dzięki temu ciężka pętla nie zawiesza UI. */
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+/** Czy błąd oznacza „oferty już nie ma" (zakończona/zarchiwizowana/404). */
+function isOfferGoneError(err: unknown): boolean {
+  const e = err as { status?: number; code?: string; message?: string }
+  if (e?.status === 404) return true
+  if (/NOT_FOUND|OFFER_ENDED|ARCHIV|ENDED/i.test(String(e?.code ?? ''))) return true
+  return /nie znaleziono oferty|offer not found|zakończ|zakoncz|zarchiwiz|archiv|ended|no such offer|not found/i.test(
+    String(e?.message ?? '')
+  )
+}
+
 /** Port kanału (BaseLinker/Allegro) — orchestrator nie zna szczegółów API. */
 export interface ChannelPort {
   channel: Channel
@@ -131,8 +144,11 @@ export class SyncOrchestrator {
     const snapshot = await this.ports.wapro.readSnapshot()
     let changed = 0
     let newProducts = 0
+    let processed = 0
 
     for (const row of snapshot) {
+      // Oddaj wątek co 100 pozycji — UI pozostaje płynne przy tysiącach SKU.
+      if (++processed % 100 === 0) await yieldToEventLoop()
       if (!row.sku) continue
       const local = this.db.getProductBySku(row.sku)
 
@@ -188,6 +204,9 @@ export class SyncOrchestrator {
       this.log('info', `${channel}: ${product.sku} → ${quantity} (oferta ${mapping.offerId}).`)
     } catch (err) {
       const e = err as { code?: string; message?: string }
+      // „0 na stanie (Archiwum)": towar ma 0 szt., a oferty już nie ma — to nie
+      // krytyczny błąd, tylko naturalny stan. Oznaczamy osobną kategorią i pomijamy.
+      const archivedZero = quantity === 0 && isOfferGoneError(err)
       this.db.enqueueError({
         channel,
         sku: product.sku,
@@ -195,10 +214,15 @@ export class SyncOrchestrator {
         offerId: mapping.offerId,
         direction: 'WAPRO->CHANNEL',
         targetQuantity: quantity,
-        errorCode: e?.code ?? 'ERROR',
-        errorMessage: e?.message ?? String(err)
+        errorCode: e?.code ?? (archivedZero ? 'ARCHIVED_ZERO' : 'ERROR'),
+        errorMessage: e?.message ?? String(err),
+        category: archivedZero ? 'archived_zero' : 'error'
       })
-      this.log('error', `${channel}: błąd ${product.sku} — ${e?.message ?? err} → Action Center.`)
+      if (archivedZero) {
+        this.log('warn', `${channel}: ${product.sku} — oferta zarchiwizowana, stan 0 → pomijam (Archiwum).`)
+      } else {
+        this.log('error', `${channel}: błąd ${product.sku} — ${e?.message ?? err} → Action Center.`)
+      }
     }
   }
 
@@ -216,7 +240,8 @@ export class SyncOrchestrator {
         direction: 'CHANNEL->WAPRO',
         targetQuantity: targetQty,
         errorCode: e?.code ?? 'ERROR',
-        errorMessage: e?.message ?? String(err)
+        errorMessage: e?.message ?? String(err),
+        category: 'error'
       })
       this.log('error', `WAPRO: błąd zapisu ${product.sku} — ${e?.message ?? err} → Action Center.`)
     }

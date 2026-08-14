@@ -23,6 +23,24 @@ export { buildNameIndex, extractEanFromOffer, normalizeTitle, pickOfferId } from
 const OFFERS_PAGE_LIMIT = 1000 // maksimum akceptowane przez /sale/offers
 const OFFER_MAP_TTL_MS = 5 * 60 * 1000
 
+// Throttling wysyłki: Allegro nie przyjmuje setek PATCH-y na sekundę bez limitu.
+const OFFER_PUSH_BATCH = 40 // co ile ofert robimy pauzę
+const OFFER_PUSH_DELAY_MS = 300 // pauza między paczkami (ms)
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+/** Oddaje wątek zdarzeń — długa pętla nie zamraża UI procesu głównego. */
+const yieldToEventLoop = () => new Promise((r) => setImmediate(r))
+
+/** Czy błąd oznacza „oferty już nie ma" (zakończona/zarchiwizowana/404). */
+function isOfferGone(err) {
+  const e = err || {}
+  if (e.status === 404) return true
+  if (/NOT_FOUND|OFFER_ENDED|ARCHIV|ENDED/i.test(String(e.code ?? ''))) return true
+  return /nie znaleziono oferty|offer not found|zakończ|zakoncz|zarchiwiz|archiv|ended|no such offer|not found/i.test(
+    String(e.message ?? '')
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Mapa ofert (z cache'em)
 // ---------------------------------------------------------------------------
@@ -150,13 +168,20 @@ export async function setOffersStock(items, log = () => {}) {
   const { allegro } = getIntegrations()
   const sandbox = Boolean(allegro.sandbox)
 
+  const list = items ?? []
   const updated = new Set()
-  for (const it of items ?? []) {
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i]
     try {
       await setOfferStock(sandbox, token, it.offerId, it.quantity)
       updated.add(String(it.offerId))
     } catch (err) {
       log('warn', `Allegro: oferta ${it.offerId} — ${interpretAllegroError(err)}`)
+    }
+    // Throttling + oddanie wątku co paczkę — UI nie zamarza przy tysiącach ofert.
+    if ((i + 1) % OFFER_PUSH_BATCH === 0 && i + 1 < list.length) {
+      await sleep(OFFER_PUSH_DELAY_MS)
+      await yieldToEventLoop()
     }
   }
   return updated
@@ -200,8 +225,10 @@ export async function updateOfferStockByCode(rows, log = () => {}) {
   const viaCount = { ean: 0, sku: 0, title: 0 }
   let updated = 0
   let failed = 0
+  let archivedZero = 0
 
-  for (const r of resolved) {
+  for (let i = 0; i < resolved.length; i++) {
+    const r = resolved[i]
     if (!r.hit) {
       notUpdated.push(r.code)
       continue
@@ -214,9 +241,21 @@ export async function updateOfferStockByCode(rows, log = () => {}) {
         `[Allegro] → stock offer ${r.hit.offerId} (kod ${r.code}, klucz ${VIA_LABEL[r.hit.via]}) = ${Math.max(0, Math.trunc(Number(r.quantity) || 0))}`
       )
     } catch (err) {
-      failed++
-      notUpdated.push(r.code)
-      log('warn', `Allegro: oferta ${r.hit.offerId} (kod ${r.code}) — ${interpretAllegroError(err)}`)
+      // „0 na stanie (Archiwum)": towar 0 szt., a oferty już nie ma — pomijamy,
+      // to nie jest krytyczny błąd synchronizacji.
+      if (Number(r.quantity) === 0 && isOfferGone(err)) {
+        archivedZero++
+        log('info', `Allegro: ${r.code} — oferta wycofana, stan 0 → pomijam (Archiwum).`)
+      } else {
+        failed++
+        notUpdated.push(r.code)
+        log('warn', `Allegro: oferta ${r.hit.offerId} (kod ${r.code}) — ${interpretAllegroError(err)}`)
+      }
+    }
+    // Throttling + oddanie wątku co paczkę.
+    if ((i + 1) % OFFER_PUSH_BATCH === 0 && i + 1 < resolved.length) {
+      await sleep(OFFER_PUSH_DELAY_MS)
+      await yieldToEventLoop()
     }
   }
 
@@ -226,6 +265,9 @@ export async function updateOfferStockByCode(rows, log = () => {}) {
       'success',
       `Allegro: zaktualizowano ${updated} ofert (EAN: ${viaCount.ean}, SKU: ${viaCount.sku}, Tytuł: ${viaCount.title}).`
     )
+  }
+  if (archivedZero > 0) {
+    log('info', `Allegro: ${archivedZero} pozycji „0 na stanie (Archiwum)" — pominięto (oferta wycofana).`)
   }
   const unmappedCount = notUpdated.length - failed
   if (unmappedCount > 0) {

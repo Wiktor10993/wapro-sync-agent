@@ -81,7 +81,9 @@ INSERT INTO dbo.ARTYKULY (ID_ARTYKULU, INDEKS_KATALOGOWY, INDEKS_HANDLOWY, EAN, 
   -- 3) Brak EAN i SKU w ofercie → dopasowanie po NAZWIE (Fuzzy) — wysyłka OK.
   (3, 'KP-TRU-16',   'KP-TRU-16',   '',              N'Kulki Proteinowe SUPER Truskawka 16mm 1kg PROMOCJA'),
   -- 4) BŁĘDNY EAN + brak oferty → „Niezmapowany produkt" (Kategoria I).
-  (4, 'PDB-X',       '',            'EAN-BLAD-123',  N'Podbierak Testowy Bez Oferty 60cm');
+  (4, 'PDB-X',       '',            'EAN-BLAD-123',  N'Podbierak Testowy Bez Oferty 60cm'),
+  -- 5) Stan 0 + oferta wycofana (mock zwraca 404) → „0 na stanie (Archiwum)".
+  (5, 'WOB-WYC-06',  'WOB-WYC-06',  '5905000000055', N'Wobler Wycofany 6cm Stary Model');
 SET IDENTITY_INSERT dbo.ARTYKULY OFF;
 GO
 
@@ -89,7 +91,8 @@ INSERT INTO dbo.STANY (ID_ARTYKULU, ID_MAGAZYNU, STAN) VALUES
   (1, 1, 15),
   (2, 1, 12),
   (3, 1, 30),
-  (4, 1, 7);
+  (4, 1, 7),
+  (5, 1, 0);   -- 0 szt. → trafi do kategorii „Archiwum", nie do błędów krytycznych
 GO
 
 /* Kontrola: co zobaczy agent (JOIN ARTYKULY⋈STANY). */
