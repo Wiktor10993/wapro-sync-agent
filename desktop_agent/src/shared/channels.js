@@ -64,9 +64,29 @@ export const CH = {
   AC_RETRY_ERROR: 'ac:retry-error',
   AC_IGNORE_ERROR: 'ac:ignore-error',
 
+  // --- eksport / raporty / mapowanie (v5) ---------------------------------
+  EXPORT_STOCKS: 'export:stocks',
+  REPORT_DEADSTOCK: 'report:deadstock',
+  REPORT_DEADSTOCK_EXPORT: 'report:deadstock-export',
+  MAPPING_TEMPLATE: 'mapping:template',
+  MAPPING_IMPORT: 'mapping:import',
+  MAPPING_LIST_PHANTOM: 'mapping:list-phantom',
+  MAPPING_RESOLVE_PHANTOM: 'mapping:resolve-phantom',
+
+  // --- analityka (v6) -----------------------------------------------------
+  ANALYTICS_COMPUTE: 'analytics:compute',
+  ANALYTICS_INGEST: 'analytics:ingest',
+  ANALYTICS_RECENT_ENDED: 'analytics:recent-ended',
+
+  // --- aktualizacje (OTA) -------------------------------------------------
+  UPDATE_CHECK: 'update:check',
+  UPDATE_INSTALL: 'update:install',
+
   // --- system -------------------------------------------------------------
   APP_PICK_FOLDER: 'app:pick-folder',
   APP_PICK_WATCH_FOLDER: 'app:pick-watch-folder',
+  APP_PICK_EXPORT_FOLDER: 'app:pick-export-folder',
+  APP_PICK_CSV_FILE: 'app:pick-csv-file',
   APP_VERSION: 'app:version',
   APP_OPEN_LOGS: 'app:open-logs',
   APP_OPEN_EXTERNAL: 'app:open-external',
@@ -75,8 +95,9 @@ export const CH = {
 
   // --- zdarzenia main → renderer (jednokierunkowe) ------------------------
   EVT_LOG: 'evt:log',
-  EVT_STATUS: 'evt:status'
+  EVT_STATUS: 'evt:status',
+  EVT_UPDATE: 'evt:update'
 }
 
 /** Kanały, na które renderer może się subskrybować. */
-export const SUBSCRIBABLE = [CH.EVT_LOG, CH.EVT_STATUS]
+export const SUBSCRIBABLE = [CH.EVT_LOG, CH.EVT_STATUS, CH.EVT_UPDATE]

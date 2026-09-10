@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { getIntegrations } from '../store.js'
 import { allegroApi, getValidAccessToken, interpretAllegroError } from './allegroAuth.js'
 import { buildNameIndex, extractEanFromOffer, pickOfferId } from './allegroSyncCore.js'
@@ -116,6 +117,56 @@ async function setOfferStock(sandbox, token, offerId, quantity) {
 }
 
 /**
+ * Zmienia status publikacji oferty (END = zakończ / ACTIVATE = wznów) przez
+ * `PUT /sale/offer-publication-commands/{commandId}`. commandId to UUID generowany
+ * po naszej stronie — dzięki temu operacja jest IDEMPOTENTNA (powtórka nie duplikuje).
+ *
+ * @param {'END'|'ACTIVATE'} action
+ */
+async function setOfferPublication(sandbox, token, offerId, action) {
+  const commandId = randomUUID()
+  return allegroApi(sandbox, token, `/sale/offer-publication-commands/${commandId}`, {
+    method: 'PUT',
+    body: {
+      publication: { action },
+      offerCriteria: [{ offers: [{ id: String(offerId) }], type: 'CONTAINS_OFFERS' }]
+    }
+  })
+}
+
+/**
+ * Kończy ofertę (stan ≤ 0). WAPRO jest źródłem prawdy — jeśli nie ma towaru,
+ * aukcja nie może wisieć aktywna. Rzuca błędem przy niepowodzeniu.
+ */
+export async function endOffer(offerId, log = () => {}) {
+  const token = await getValidAccessToken(log)
+  const { allegro } = getIntegrations()
+  await setOfferPublication(Boolean(allegro.sandbox), token, offerId, 'END')
+  log('info', `Allegro: zakończono ofertę ${offerId} (stan ≤ 0).`)
+}
+
+/**
+ * Wznawia zakończoną ofertę (towar wrócił). Zwraca true przy sukcesie; przy
+ * ofercie wygasłej/usuniętej (której nie da się aktywować) zwraca false, żeby
+ * warstwa wyżej mogła oznaczyć „Wystaw ponownie" (needs_relist).
+ */
+export async function activateOffer(offerId, log = () => {}) {
+  const token = await getValidAccessToken(log)
+  const { allegro } = getIntegrations()
+  try {
+    await setOfferPublication(Boolean(allegro.sandbox), token, offerId, 'ACTIVATE')
+    log('info', `Allegro: wznowiono ofertę ${offerId} (towar wrócił).`)
+    return true
+  } catch (err) {
+    if (isOfferGone(err)) {
+      log('warn', `Allegro: oferty ${offerId} nie można wznowić (wygasła/usunięta) — wymaga ponownego wystawienia.`)
+      return false
+    }
+    throw err
+  }
+}
+
+/**
  * Surowa lista ofert w kształcie OfferCandidate — dla nowego silnika (orchestrator).
  * @returns {Promise<Array<{offerId:string, sku:string, ean:string, name:string}>>}
  */
@@ -138,6 +189,40 @@ export async function listOffers(log = () => {}) {
         sku: String(o?.external?.id ?? '').trim(),
         ean: extractEanFromOffer(o),
         name: String(o?.name ?? '')
+      })
+    }
+    offset += offers.length
+    if (offers.length < OFFERS_PAGE_LIMIT) break
+    if (total != null && offset >= total) break
+  }
+  return out
+}
+
+/**
+ * Lista ofert wraz z dostępnym stanem — do eksportu CSV i raportu martwych stanów.
+ * @returns {Promise<Array<{offerId:string, sku:string, ean:string, name:string, quantity:number, status:string}>>}
+ */
+export async function listOffersWithStock(log = () => {}) {
+  const token = await getValidAccessToken(log)
+  const { allegro } = getIntegrations()
+  const sandbox = Boolean(allegro.sandbox)
+
+  const out = []
+  let offset = 0
+  let total = null
+  for (let page = 0; page < 200; page++) {
+    const data = await allegroApi(sandbox, token, `/sale/offers?limit=${OFFERS_PAGE_LIMIT}&offset=${offset}`)
+    const offers = data?.offers ?? []
+    if (total == null) total = Number(data?.totalCount ?? data?.count ?? 0) || null
+    if (offers.length === 0) break
+    for (const o of offers) {
+      out.push({
+        offerId: String(o?.id ?? ''),
+        sku: String(o?.external?.id ?? '').trim(),
+        ean: extractEanFromOffer(o),
+        name: String(o?.name ?? ''),
+        quantity: Number(o?.stock?.available ?? o?.stock?.sold ?? 0) || 0,
+        status: String(o?.publication?.status ?? o?.sellingMode?.format ?? '')
       })
     }
     offset += offers.length

@@ -90,6 +90,26 @@ const api = {
   acRetryError: (id) => invoke(CH.AC_RETRY_ERROR, { id }),
   acIgnoreError: (id) => invoke(CH.AC_IGNORE_ERROR, { id }),
 
+  // --- eksport / raporty / mapowanie (v5) ---------------------------------
+  pickExportFolder: () => invoke(CH.APP_PICK_EXPORT_FOLDER),
+  pickCsvFile: () => invoke(CH.APP_PICK_CSV_FILE),
+  exportStocks: (payload) => invoke(CH.EXPORT_STOCKS, payload),
+  reportDeadStock: () => invoke(CH.REPORT_DEADSTOCK),
+  reportDeadStockExport: (folder) => invoke(CH.REPORT_DEADSTOCK_EXPORT, { folder }),
+  mappingTemplate: (folder) => invoke(CH.MAPPING_TEMPLATE, { folder }),
+  mappingImport: (filePath, channels) => invoke(CH.MAPPING_IMPORT, { filePath, channels }),
+  mappingListPhantom: () => invoke(CH.MAPPING_LIST_PHANTOM),
+  mappingResolvePhantom: (id, action) => invoke(CH.MAPPING_RESOLVE_PHANTOM, { id, action }),
+
+  // --- analityka (v6) -----------------------------------------------------
+  analyticsCompute: (opts) => invoke(CH.ANALYTICS_COMPUTE, opts),
+  analyticsIngest: (days) => invoke(CH.ANALYTICS_INGEST, { days }),
+  analyticsRecentEnded: () => invoke(CH.ANALYTICS_RECENT_ENDED),
+
+  // --- aktualizacje (OTA) -------------------------------------------------
+  updateCheck: () => invoke(CH.UPDATE_CHECK),
+  updateInstall: () => invoke(CH.UPDATE_INSTALL),
+
   // --- system -------------------------------------------------------------
   pickFolder: () => invoke(CH.APP_PICK_FOLDER),
   pickWatchFolder: () => invoke(CH.APP_PICK_WATCH_FOLDER),
@@ -117,7 +137,8 @@ const api = {
   },
 
   onLog: (handler) => api.subscribe(CH.EVT_LOG, handler),
-  onStatus: (handler) => api.subscribe(CH.EVT_STATUS, handler)
+  onStatus: (handler) => api.subscribe(CH.EVT_STATUS, handler),
+  onUpdate: (handler) => api.subscribe(CH.EVT_UPDATE, handler)
 }
 
 contextBridge.exposeInMainWorld('agent', api)

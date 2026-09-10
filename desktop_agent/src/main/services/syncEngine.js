@@ -17,6 +17,8 @@ import { fetchStockSnapshot } from '../wapro/inventoryRepository.js'
 import { getPool } from '../wapro/pool.js'
 import * as blApi from './baselinkerApi.js'
 import * as allegroSync from './allegroSync.js'
+import * as restockStore from './restockStore.js'
+import * as analytics from './analytics.js'
 import {
   getAllegroStockHashes,
   getDbSettings,
@@ -50,7 +52,7 @@ async function loadSnapshot() {
     aggregateWarehouses: sync.aggregateWarehouses,
     schemaOverrides: getSchemaMap()
   })
-  return rows.map((r) => ({
+  const mapped = rows.map((r) => ({
     idArtykulu: 0,
     sku: r.sku,
     ean: r.barcode ?? '',
@@ -58,6 +60,9 @@ async function loadSnapshot() {
     quantity: r.quantity,
     warehouseId: r.warehouseId ?? null
   }))
+  // v6: zapis snapshotu do historii sprzedaży (throttlowany, nieblokujący).
+  analytics.recordSnapshot(mapped).catch(() => {})
+  return mapped
 }
 
 // ---------------------------------------------------------------------------
@@ -99,11 +104,52 @@ function allegroAdapter(log) {
     async fetchOffers() {
       return allegroSync.listOffers(log)
     },
+    /**
+     * #2: WAPRO jest źródłem prawdy.
+     *  - stan ≤ 0  → ZAKOŃCZ ofertę (END) i zapisz do obserwacji (restock_watch),
+     *  - stan > 0  → jeśli oferta była zakończona, najpierw WZNÓW (ACTIVATE),
+     *                a potem ustaw stan; nieodwracalne → „needs_relist".
+     */
     async pushStock(items, _batchOptions) {
-      const updatedOfferIds = await allegroSync.setOffersStock(
-        items.map((i) => ({ offerId: i.offerId, quantity: i.quantity })),
+      const zero = []
+      const positive = []
+      for (const i of items) {
+        if (Math.trunc(Number(i.quantity) || 0) <= 0) zero.push(i)
+        else positive.push(i)
+      }
+      const updatedOfferIds = new Set()
+
+      // 1) Stan > 0 — wznów zakończone oferty, zanim ustawimy stan.
+      for (const i of positive) {
+        try {
+          if (await restockStore.isWatched('allegro', i.offerId)) {
+            const ok = await allegroSync.activateOffer(i.offerId, log)
+            if (ok) await restockStore.clearRestock('allegro', i.offerId)
+            else await restockStore.flagNeedsRelist({ channel: 'allegro', offerId: i.offerId, sku: i.sku ?? '', ean: i.ean ?? '', quantity: i.quantity })
+          }
+        } catch (err) {
+          log('warn', `Allegro: wznowienie oferty ${i.offerId} nie powiodło się: ${err?.message ?? err}`)
+        }
+      }
+      // Ustawienie stanów (batchowane + throttling wewnątrz setOffersStock).
+      const setUpdated = await allegroSync.setOffersStock(
+        positive.map((i) => ({ offerId: i.offerId, quantity: i.quantity })),
         log
       )
+      for (const id of setUpdated) updatedOfferIds.add(String(id))
+
+      // 2) Stan ≤ 0 — zakończ ofertę i weź na obserwację do wznowienia.
+      for (const i of zero) {
+        try {
+          await allegroSync.endOffer(i.offerId, log)
+          await restockStore.watchRestock({ channel: 'allegro', offerId: i.offerId, sku: i.sku ?? '', ean: i.ean ?? '' })
+        } catch (err) {
+          // Oferty już nie ma → i tak traktujemy jako zamkniętą (nie kręcimy w kółko).
+          log('info', `Allegro: oferta ${i.offerId} już zakończona/nieobecna — pomijam (${err?.message ?? err}).`)
+        }
+        updatedOfferIds.add(String(i.offerId)) // zatwierdź hash: nie kończ jej co cykl
+      }
+
       return { updatedOfferIds }
     }
   }

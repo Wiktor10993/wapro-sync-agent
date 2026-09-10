@@ -54,8 +54,36 @@ export interface UnmappedItem {
   status: QueueStatus
 }
 
-/** Kategoria wpisu: krytyczny błąd vs „0 na stanie (Archiwum)" (informacyjny). */
-export type ErrorCategory = 'error' | 'archived_zero'
+/**
+ * Kategoria wpisu w kolejce błędów:
+ *  - 'error'         : krytyczny błąd wysyłki,
+ *  - 'archived_zero' : „0 na stanie (Archiwum)" — stan 0 i oferty już nie ma (informacyjny),
+ *  - 'needs_relist'  : towar wrócił (>0), ale zakończonej oferty nie da się automatycznie
+ *                      wznowić (wygasła/usunięta) → operator wystawia ponownie.
+ */
+export type ErrorCategory = 'error' | 'archived_zero' | 'needs_relist'
+
+/** Pozycja „na obserwacji do wznowienia" — oferta zakończona przy stanie ≤ 0. */
+export interface RestockWatchItem {
+  id: number
+  sku: string
+  ean: string
+  channel: Channel
+  offerId: string
+  endedAt: string
+}
+
+/** Produkt-widmo: mapowanie z CSV wskazuje ofertę, ale nie ma go w WAPRO. */
+export interface PhantomProduct {
+  id: number
+  sku: string
+  ean: string
+  name: string
+  allegroOfferId: string
+  baselinkerProductId: string
+  createdAt: string
+  status: QueueStatus
+}
 
 export interface SyncError {
   id: number
@@ -141,6 +169,55 @@ CREATE TABLE IF NOT EXISTS applied_deltas (
   at_ms    INTEGER NOT NULL,
   PRIMARY KEY (sku)
 );
+
+-- #2: oferty zakończone przy stanie <= 0, do automatycznego wznowienia gdy towar wróci.
+CREATE TABLE IF NOT EXISTS restock_watch (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku       TEXT NOT NULL DEFAULT '',
+  ean       TEXT NOT NULL DEFAULT '',
+  channel   TEXT NOT NULL,
+  offer_id  TEXT NOT NULL,
+  ended_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(channel, offer_id)
+);
+CREATE INDEX IF NOT EXISTS ix_restock_sku ON restock_watch(sku);
+
+-- #3: produkty-widma z importu CSV (mapowanie kanału bez odpowiednika w WAPRO).
+CREATE TABLE IF NOT EXISTS phantom_products (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku                    TEXT NOT NULL DEFAULT '',
+  ean                    TEXT NOT NULL DEFAULT '',
+  name                   TEXT NOT NULL DEFAULT '',
+  allegro_offer_id       TEXT NOT NULL DEFAULT '',
+  baselinker_product_id  TEXT NOT NULL DEFAULT '',
+  created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+  status                 TEXT NOT NULL DEFAULT 'open',
+  UNIQUE(ean, allegro_offer_id, baselinker_product_id)
+);
+
+-- v6: historia stanów WAPRO (snapshoty co cykl) — do liczenia prędkości sprzedaży.
+CREATE TABLE IF NOT EXISTS stock_history (
+  sku      TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  at_ms    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_stockhist_sku_at ON stock_history(sku, at_ms);
+CREATE INDEX IF NOT EXISTS ix_stockhist_at ON stock_history(at_ms);
+
+-- v6: zdarzenia sprzedaży (seed z zamówień BL/Allegro + spadki stanu WAPRO).
+-- source: 'baselinker' | 'allegro' | 'wapro_delta'. ref = klucz deduplikacji.
+CREATE TABLE IF NOT EXISTS sales_events (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku    TEXT NOT NULL DEFAULT '',
+  ean    TEXT NOT NULL DEFAULT '',
+  qty    INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  ref    TEXT NOT NULL DEFAULT '',
+  at_ms  INTEGER NOT NULL,
+  UNIQUE(source, ref)
+);
+CREATE INDEX IF NOT EXISTS ix_sales_sku_at ON sales_events(sku, at_ms);
+CREATE INDEX IF NOT EXISTS ix_sales_at ON sales_events(at_ms);
 `
 
 export class LocalDatabase {
@@ -286,6 +363,132 @@ export class LocalDatabase {
     this.db.prepare(`UPDATE sync_errors SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?`).run(id)
   }
 
+  // --- restock watch (#2: wznowienia ofert) ------------------------------
+  /** Dodaje ofertę na listę obserwacji do wznowienia (idempotentnie). */
+  watchRestock(w: { sku?: string; ean?: string; channel: Channel; offerId: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO restock_watch (sku, ean, channel, offer_id, ended_at)
+         VALUES (@sku, @ean, @channel, @offerId, datetime('now'))
+         ON CONFLICT(channel, offer_id) DO UPDATE SET
+           sku = excluded.sku, ean = excluded.ean, ended_at = datetime('now')`
+      )
+      .run({ sku: w.sku ?? '', ean: w.ean ?? '', channel: w.channel, offerId: w.offerId })
+  }
+
+  listRestock(): RestockWatchItem[] {
+    return (this.db.prepare('SELECT * FROM restock_watch ORDER BY ended_at ASC').all() as any[]).map(mapRestock)
+  }
+
+  /** Usuwa z obserwacji po pomyślnym wznowieniu. */
+  clearRestock(channel: Channel, offerId: string): void {
+    this.db.prepare('DELETE FROM restock_watch WHERE channel = ? AND offer_id = ?').run(channel, offerId)
+  }
+
+  isWatched(channel: Channel, offerId: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM restock_watch WHERE channel = ? AND offer_id = ?').get(channel, offerId)
+  }
+
+  // --- phantom products (#3: mapowanie CSV bez odpowiednika w WAPRO) ------
+  upsertPhantom(p: { sku?: string; ean?: string; name?: string; allegroOfferId?: string; baselinkerProductId?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO phantom_products (sku, ean, name, allegro_offer_id, baselinker_product_id, status)
+         VALUES (@sku, @ean, @name, @allegro, @baselinker, 'open')
+         ON CONFLICT(ean, allegro_offer_id, baselinker_product_id) DO UPDATE SET
+           sku = excluded.sku, name = excluded.name`
+      )
+      .run({
+        sku: p.sku ?? '',
+        ean: p.ean ?? '',
+        name: p.name ?? '',
+        allegro: p.allegroOfferId ?? '',
+        baselinker: p.baselinkerProductId ?? ''
+      })
+  }
+
+  listPhantom(status: QueueStatus = 'open'): PhantomProduct[] {
+    return (this.db.prepare('SELECT * FROM phantom_products WHERE status = ? ORDER BY created_at DESC').all(status) as any[]).map(mapPhantom)
+  }
+
+  setPhantomStatus(id: number, status: QueueStatus): void {
+    this.db.prepare('UPDATE phantom_products SET status = ? WHERE id = ?').run(status, id)
+  }
+
+  // --- historia stanów + sprzedaż (v6 analityka) -------------------------
+  /** Zapisuje snapshot stanów (bulk, jeden znacznik czasu). */
+  recordStockSnapshot(rows: Array<{ sku: string; quantity: number }>): void {
+    const at = Date.now()
+    const stmt = this.db.prepare('INSERT INTO stock_history (sku, quantity, at_ms) VALUES (?, ?, ?)')
+    const tx = this.db.transaction((items: Array<{ sku: string; quantity: number }>) => {
+      for (const r of items) {
+        if (!r.sku) continue
+        stmt.run(r.sku, Math.trunc(Number(r.quantity) || 0), at)
+      }
+    })
+    tx(rows)
+  }
+
+  /** Ostatni znany stan per SKU z historii (do wykrywania spadków = sprzedaży). */
+  latestStockMap(): Map<string, number> {
+    const rows = this.db
+      .prepare('SELECT sku, quantity FROM stock_history sh WHERE at_ms = (SELECT MAX(at_ms) FROM stock_history WHERE sku = sh.sku)')
+      .all() as Array<{ sku: string; quantity: number }>
+    const m = new Map<string, number>()
+    for (const r of rows) m.set(r.sku, r.quantity)
+    return m
+  }
+
+  /** Wstawia zdarzenia sprzedaży z deduplikacją (source+ref). Zwraca liczbę nowych. */
+  recordSales(events: Array<{ sku: string; ean?: string; qty: number; source: string; ref: string; atMs: number }>): number {
+    const stmt = this.db.prepare(
+      'INSERT OR IGNORE INTO sales_events (sku, ean, qty, source, ref, at_ms) VALUES (@sku, @ean, @qty, @source, @ref, @atMs)'
+    )
+    let inserted = 0
+    const tx = this.db.transaction((items: typeof events) => {
+      for (const e of items) {
+        if (!e.sku && !e.ean) continue
+        const info = stmt.run({ sku: e.sku ?? '', ean: e.ean ?? '', qty: Math.trunc(Number(e.qty) || 0), source: e.source, ref: e.ref, atMs: e.atMs })
+        inserted += info.changes
+      }
+    })
+    tx(events)
+    return inserted
+  }
+
+  /** Suma sprzedanych sztuk per SKU od `sinceMs` (opcjonalnie filtr źródeł). */
+  salesBySku(sinceMs: number, sources?: string[]): Map<string, number> {
+    return this.salesBySkuBetween(sinceMs, Date.now(), sources)
+  }
+
+  salesBySkuBetween(fromMs: number, toMs: number, sources?: string[]): Map<string, number> {
+    let sql = 'SELECT sku, SUM(qty) AS n FROM sales_events WHERE at_ms >= ? AND at_ms < ?'
+    const args: any[] = [fromMs, toMs]
+    if (sources && sources.length) {
+      sql += ` AND source IN (${sources.map(() => '?').join(',')})`
+      args.push(...sources)
+    }
+    sql += ' GROUP BY sku'
+    const rows = this.db.prepare(sql).all(...args) as Array<{ sku: string; n: number }>
+    const m = new Map<string, number>()
+    for (const r of rows) if (r.sku) m.set(r.sku, Number(r.n) || 0)
+    return m
+  }
+
+  /** Liczba różnych dni z zapisanym snapshotem od `sinceMs` (ocena pokrycia WAPRO). */
+  snapshotDayCount(sinceMs: number): number {
+    const r = this.db
+      .prepare("SELECT COUNT(DISTINCT date(at_ms/1000,'unixepoch')) AS d FROM stock_history WHERE at_ms >= ?")
+      .get(sinceMs) as { d: number }
+    return Number(r?.d) || 0
+  }
+
+  /** Czyści historię starszą niż `beforeMs` (retencja). */
+  pruneHistory(beforeMs: number): void {
+    this.db.prepare('DELETE FROM stock_history WHERE at_ms < ?').run(beforeMs)
+    this.db.prepare('DELETE FROM sales_events WHERE at_ms < ?').run(beforeMs)
+  }
+
   // --- loop guard (applied deltas) ---------------------------------------
   recordApplied(sku: string, origin: Origin, quantity: number): void {
     this.db
@@ -316,4 +519,10 @@ function mapUnmapped(r: any): UnmappedItem {
 }
 function mapError(r: any): SyncError {
   return { id: r.id, channel: r.channel, sku: r.sku, ean: r.ean, offerId: r.offer_id ?? null, direction: r.direction, targetQuantity: r.target_qty, errorCode: r.error_code, errorMessage: r.error_message, category: r.category ?? 'error', attempts: r.attempts, createdAt: r.created_at, lastAttemptAt: r.last_attempt_at, status: r.status }
+}
+function mapRestock(r: any): RestockWatchItem {
+  return { id: r.id, sku: r.sku ?? '', ean: r.ean ?? '', channel: r.channel, offerId: r.offer_id, endedAt: r.ended_at }
+}
+function mapPhantom(r: any): PhantomProduct {
+  return { id: r.id, sku: r.sku ?? '', ean: r.ean ?? '', name: r.name ?? '', allegroOfferId: r.allegro_offer_id ?? '', baselinkerProductId: r.baselinker_product_id ?? '', createdAt: r.created_at, status: r.status }
 }

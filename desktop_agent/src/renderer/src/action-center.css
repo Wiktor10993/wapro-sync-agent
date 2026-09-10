@@ -1,5 +1,100 @@
 /* Action Center — czytelny, responsywny układ mapowania + spinner + przejścia. */
 
+/* --- Boczne menu (v5.1 UX) --- */
+.app--sidebar .app__body {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.sidebar {
+  flex: 0 0 210px;
+  width: 210px;
+  padding: 12px 8px;
+  border-right: 1px solid rgba(127, 127, 127, 0.18);
+  overflow-y: auto;
+}
+.sidebar__section { margin-bottom: 14px; }
+.sidebar__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.55;
+  padding: 0 10px 6px;
+  font-weight: 700;
+}
+.sidebar__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  margin: 2px 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.sidebar__item:hover { background: rgba(127, 127, 127, 0.1); }
+.sidebar__item--active {
+  background: rgba(59, 130, 246, 0.14);
+  color: #2563eb;
+  font-weight: 600;
+}
+.content--with-sidebar {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 18px 22px;
+}
+@media (max-width: 760px) {
+  .app--sidebar .app__body { flex-direction: column; }
+  .sidebar { flex-basis: auto; width: auto; border-right: 0; border-bottom: 1px solid rgba(127,127,127,.18); display: flex; flex-wrap: wrap; gap: 4px; }
+  .sidebar__section { margin-bottom: 4px; }
+  .sidebar__title { display: none; }
+}
+
+
+/* --- Narzędzia (v5): eksport / raporty / mapowanie --- */
+.tab-narzedzia .card { margin-bottom: 16px; }
+.tab-narzedzia .field-row label { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; }
+.result-list { margin: 10px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+.result-list code { background: rgba(127,127,127,.12); padding: 1px 5px; border-radius: 4px; }
+.result-summary { margin-top: 10px; font-size: 13px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th, .data-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid rgba(127,127,127,.18); vertical-align: top; }
+.data-table th { position: sticky; top: 0; background: var(--bg, #fff); font-weight: 600; }
+.btn--small { padding: 4px 10px; font-size: 12px; }
+
+/* --- Toast aktualizacji (OTA) --- */
+.update-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: #1f2937;
+  color: #fff;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+  max-width: 420px;
+}
+.update-toast__close {
+  border: 0;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+
 /* Podzakładki */
 .tabs--sub {
   display: flex;

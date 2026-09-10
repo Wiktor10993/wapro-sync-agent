@@ -11,12 +11,20 @@
  */
 
 import { withRetry, DEFAULT_BATCH_OPTIONS, type BatchOptions } from '../sync/batchRunner'
+import { getLimiter } from '../util/rateLimiter'
 
 const ENDPOINT = 'https://api.baselinker.com/connector.php'
 const TIMEOUT_MS = 30_000
 
 /** Max produktów na jedno wywołanie updateInventoryProductsStock. */
 const BL_MAX_PRODUCTS_PER_CALL = 1000
+
+/**
+ * Limit API BaseLinkera: 100 req/min na token. Trzymamy 90/min jako margines,
+ * żeby proaktywnie NIE dobijać do limitu (retry w batchRunner to tylko siatka).
+ */
+const BL_RATE_MAX = 90
+const BL_RATE_WINDOW_MS = 60_000
 
 export interface BaselinkerConfig {
   token: string
@@ -50,8 +58,15 @@ function blError(message: string, code?: string, status?: number): BaselinkerErr
 export class BaselinkerClient {
   constructor(private readonly config: BaselinkerConfig) {}
 
+  /** Limiter współdzielony przez wszystkie instancje z tym samym tokenem. */
+  private get limiter() {
+    return getLimiter(`baselinker:${this.config.token}`, { max: BL_RATE_MAX, windowMs: BL_RATE_WINDOW_MS })
+  }
+
   /** Surowe wywołanie metody API. Odpowiedź ZAWSZE ma HTTP 200 — o błędzie decyduje `status`. */
   async call<T = any>(method: string, parameters: Record<string, unknown> = {}): Promise<T> {
+    // Proaktywny throttling: czekamy na wolny slot w oknie 90/min ZANIM wyślemy.
+    await this.limiter.take()
     let res: Response
     try {
       res = await fetch(ENDPOINT, {

@@ -1,6 +1,6 @@
 {
   "name": "wapro-sync-agent",
-  "version": "4.1.0",
+  "version": "6.0.0",
   "private": true,
   "description": "Lokalny agent synchronizacji Wapro Mag ⇄ Allegro / BaseLinker (stany i zamówienia).",
   "author": {
@@ -27,6 +27,7 @@
   "dependencies": {
     "better-sqlite3": "^11.3.0",
     "electron-store": "^8.2.0",
+    "electron-updater": "^6.3.9",
     "mssql": "9.3.2",
     "node-cron": "^3.0.3"
   },
@@ -56,6 +57,16 @@
     "files": [
       "out/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Wiktor10993",
+        "repo": "wapro-sync-agent"
+      }
     ],
     "win": {
       "target": [

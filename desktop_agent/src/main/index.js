@@ -54,6 +54,12 @@ import {
 import { isSchedulerRunning, startScheduler, stopScheduler } from './services/scheduler.js'
 import { ensureAuditSchema, queryAuditLog } from './services/syncEngine.js'
 import * as actionCenter from './services/actionCenter.js'
+import * as exportService from './services/exportService.js'
+import * as deadStockReport from './services/deadStockReport.js'
+import * as mappingCsv from './services/mappingCsv.js'
+import * as analytics from './services/analytics.js'
+import * as restockStore from './services/restockStore.js'
+import * as updater from './services/updater.js'
 import { closeLogger, getLogDirectory, writeLogLine } from './services/fileLogger.js'
 import { createTray, destroyTray, getAutoStart, setAutoStart, updateTrayMenu } from './services/tray.js'
 
@@ -103,6 +109,12 @@ function emitStatus(patch) {
   }
 
   updateTrayMenu({ ...lastStatus, ...getPublicSettings() }, trayHandlers)
+}
+
+function emitUpdate(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(CH.EVT_UPDATE, payload)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +495,46 @@ function registerIpc() {
   handle(CH.AC_RETRY_ERROR, async ({ id } = {}) => actionCenter.retryError(id))
   handle(CH.AC_IGNORE_ERROR, async ({ id } = {}) => actionCenter.ignoreError(id))
 
+  // --- eksport / raporty / mapowanie (v5) --------------------------------
+  handle(CH.EXPORT_STOCKS, async ({ folder, sources, combined } = {}) =>
+    exportService.exportStocks({ folder, sources, combined }, log)
+  )
+  handle(CH.REPORT_DEADSTOCK, async () => deadStockReport.buildReport(log))
+  handle(CH.REPORT_DEADSTOCK_EXPORT, async ({ folder } = {}) => deadStockReport.exportReport(folder, log))
+  handle(CH.MAPPING_TEMPLATE, async ({ folder } = {}) => mappingCsv.exportTemplate(folder, log))
+  handle(CH.MAPPING_IMPORT, async ({ filePath, channels } = {}) => mappingCsv.importMapping(filePath, { channels }, log))
+  handle(CH.MAPPING_LIST_PHANTOM, async () => mappingCsv.listPhantom())
+  handle(CH.MAPPING_RESOLVE_PHANTOM, async ({ id, action } = {}) => mappingCsv.resolvePhantom(id, action))
+
+  // --- analityka (v6) ----------------------------------------------------
+  handle(CH.ANALYTICS_COMPUTE, async (opts = {}) => analytics.computeAnalytics(opts, log))
+  handle(CH.ANALYTICS_INGEST, async ({ days } = {}) => analytics.ingestOrders({ days }, log))
+  handle(CH.ANALYTICS_RECENT_ENDED, async () => restockStore.listRestock())
+
+  // --- aktualizacje (OTA) ------------------------------------------------
+  handle(CH.UPDATE_CHECK, async () => updater.checkForUpdates())
+  handle(CH.UPDATE_INSTALL, async () => {
+    updater.quitAndInstall()
+    return { ok: true }
+  })
+
+  handle(CH.APP_PICK_EXPORT_FOLDER, async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Wybierz folder na pliki CSV',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
+  handle(CH.APP_PICK_CSV_FILE, async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Wskaż plik CSV z mapowaniem',
+      properties: ['openFile'],
+      filters: [{ name: 'CSV', extensions: ['csv', 'txt'] }]
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
   // --- system ------------------------------------------------------------
   handle(CH.APP_PICK_FOLDER, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -598,6 +650,13 @@ if (gotLock) {
       emitStatus({ schedulerRunning: isSchedulerRunning() })
     } catch (err) {
       log('error', `Nie udało się uruchomić harmonogramu: ${err.message}`)
+    }
+
+    // Auto-update (OTA) — tylko w wersji spakowanej; sprawdza feed po starcie.
+    try {
+      await updater.initUpdater({ isDev, onEvent: emitUpdate, log })
+    } catch (err) {
+      log('warn', `Auto-update: ${err.message}`)
     }
 
     app.on('activate', () => {

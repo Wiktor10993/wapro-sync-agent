@@ -28,16 +28,10 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build Windows App & Installer
-        # --publish never: budujemy tylko instalator; wgranie do Release robi
-        # osobny krok poniżej. Bez tego electron-builder próbuje sam publikować
-        # (bo package.json ma pole "repository") i wywala się na kroku publish.
-        run: npm run build:win -- --publish never
-
-      - name: Upload Installer to Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: 'desktop_agent/release/*.exe'
+      - name: Build & Publish Windows Installer
+        # --publish always: electron-builder buduje instalator i wgrywa do GitHub
+        # Releases KOMPLET plików wymaganych przez auto-update: .exe + latest.yml
+        # + .blockmap. Provider „github" jest w package.json (build.publish).
+        run: npm run build:win -- --publish always
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
