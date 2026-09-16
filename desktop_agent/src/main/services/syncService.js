@@ -8,6 +8,7 @@ import { ensureStagingSchema, writeOrderToStaging } from '../wapro/orderReposito
 import { reflectBufferToXml } from '../wapro/bufferReflector.js'
 import * as blApi from './baselinkerApi.js'
 import * as allegroSync from './allegroSync.js'
+import { pullAllegroStockDeltas } from './allegroStockDelta.js'
 import * as syncEngine from './syncEngine.js'
 import {
   getAllegroStockHashes,
@@ -188,19 +189,38 @@ export async function runSyncDown(log = () => {}) {
   try {
     const sync = getSyncSettings()
 
+    // v6.1: Allegro podpięte OSOBNO → nie zaciągamy całego zamówienia, tylko
+    // ZDEJMUJEMY STAN w WAPRO (delta w INTEG.WAPRO_DELTA_BUFOR). Robimy to
+    // NIEZALEŻNIE od folderu XML — parytet stanu Allegro nie może czekać na
+    // konfigurację importu zamówień BaseLinkera.
+    let allegroStock = { applied: 0, orders: 0 }
+    try {
+      allegroStock = await pullAllegroStockDeltas(log)
+    } catch (err) {
+      log('warn', `Allegro→WAPRO (stan): ${err.message}`)
+    }
+
+    // Fail-fast: zamówienia BaseLinker w trybie XML wymagają folderu; bez niego
+    // nie pobieramy ich (Allegro-stan już przeleciał wyżej).
+    if ((sync.orderMode ?? 'xml') !== 'staging' && !sync.xmlOutputFolder) {
+      log('warn', 'SyncDown: zamówienia BaseLinker pominięte — nie wskazano folderu na pliki XML (Synchronizacja → „Folder na pliki XML").')
+      markSync('down')
+      return { skipped: true, reason: 'no-xml-folder', allegroStock }
+    }
+
     log('info', 'SyncDown: pobieram zamówienia z BaseLinkera…')
     const rawOrders = await blApi.getOrders({ includeUnconfirmed: false }, log)
 
-    // Ujednolicamy kształt do tego, którego oczekują zapisywacze XML/bufora.
-    // Bez Cloud Huba nie ma kolejki ani potwierdzeń — deduplikację robimy
-    // lokalnie (istniejący plik XML / rekord w tabeli pośredniej).
+    // Zamówienia BaseLinker → pełny dokument (ECO/tabela pośrednia). Dedup lokalnie
+    // (istniejący plik XML / rekord w tabeli pośredniej).
     const orders = rawOrders.map((o) => ({
       queue_id: o.order_id,
       external_id: o.order_id,
       source: 'baselinker',
       order: o
     }))
-    const counts = { fetched: orders.length }
+
+    const counts = { fetched: orders.length, allegroStock }
 
     if (orders.length === 0) {
       log('info', 'SyncDown: brak nowych zamówień.')

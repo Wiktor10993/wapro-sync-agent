@@ -4,6 +4,7 @@ import { Checkbox, Field } from '../components/ui.jsx'
 export default function SyncTab({ settings, busy, run, onSaved }) {
   const [form, setForm] = useState(settings.sync)
   const [warehouses, setWarehouses] = useState([])
+  const [ecoCandidates, setEcoCandidates] = useState([])
 
   useEffect(() => setForm(settings.sync), [settings.sync])
 
@@ -158,7 +159,39 @@ export default function SyncTab({ settings, busy, run, onSaved }) {
                 >
                   Wybierz…
                 </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy === 'eco-find'}
+                  onClick={async () => {
+                    const res = await run('eco-find', () => window.agent.findEcoFolders())
+                    setEcoCandidates(res?.candidates || [])
+                  }}
+                  title="Best-effort: skanuje typowe ścieżki WAPRO i podpowiada foldery ECO/EDI."
+                >
+                  {busy === 'eco-find' ? 'Szukam…' : 'Znajdź automatycznie'}
+                </button>
               </div>
+              {ecoCandidates.length > 0 && (
+                <div className="eco-candidates">
+                  <p className="muted">Znalezione foldery — kliknij właściwy (potwierdź, że to folder importu ECO w WAPRO):</p>
+                  {ecoCandidates.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className="eco-candidate"
+                      onClick={() => { setForm((f) => ({ ...f, xmlOutputFolder: c })); setEcoCandidates([]) }}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {ecoCandidates.length === 0 && busy !== 'eco-find' && form.xmlOutputFolder === '' && (
+                <p className="muted" style={{ marginTop: 6 }}>
+                  Wskaż folder, z którego WAPRO importuje ECO — albo użyj „Znajdź automatycznie".
+                </p>
+              )}
             </Field>
             <p className="hint">
               Agent nie nadpisuje istniejących plików — zamówienie już wyeksportowane

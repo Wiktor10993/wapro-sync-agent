@@ -87,6 +87,7 @@ export const CH = {
   APP_PICK_WATCH_FOLDER: 'app:pick-watch-folder',
   APP_PICK_EXPORT_FOLDER: 'app:pick-export-folder',
   APP_PICK_CSV_FILE: 'app:pick-csv-file',
+  APP_FIND_ECO_FOLDERS: 'app:find-eco-folders',
   APP_VERSION: 'app:version',
   APP_OPEN_LOGS: 'app:open-logs',
   APP_OPEN_EXTERNAL: 'app:open-external',

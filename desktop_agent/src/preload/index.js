@@ -113,6 +113,7 @@ const api = {
   // --- system -------------------------------------------------------------
   pickFolder: () => invoke(CH.APP_PICK_FOLDER),
   pickWatchFolder: () => invoke(CH.APP_PICK_WATCH_FOLDER),
+  findEcoFolders: () => invoke(CH.APP_FIND_ECO_FOLDERS),
   getVersion: () => invoke(CH.APP_VERSION),
   openLogs: () => invoke(CH.APP_OPEN_LOGS),
   openExternal: (url) => invoke(CH.APP_OPEN_EXTERNAL, { url }),

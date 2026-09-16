@@ -391,7 +391,22 @@ export async function getValidAccessToken(log = () => {}) {
  * @param {string} path
  * @param {{method?:string, body?:object|null, timeoutMs?:number}} [opts]
  */
-export async function allegroApi(sandbox, accessToken, path, { method = 'GET', body = null, timeoutMs = 30000 } = {}) {
+/** Czy błąd Allegro jest przejściowy (timeout / sieć / 5xx / 429) — wtedy retry ma sens. */
+function isRetryableAllegro(err) {
+  const status = err?.status
+  if (status === 429 || (typeof status === 'number' && status >= 500)) return true
+  const msg = String(err?.message ?? err)
+  return /aborted due to timeout|TimeoutError|AbortError|fetch failed|ENOTFOUND|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|network|terminated/i.test(msg)
+}
+
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+export async function allegroApi(
+  sandbox,
+  accessToken,
+  path,
+  { method = 'GET', body = null, timeoutMs = 45000, retries = 3, retryBaseMs = 800 } = {}
+) {
   const { api } = endpoints(sandbox)
 
   const headers = {
@@ -400,28 +415,44 @@ export async function allegroApi(sandbox, accessToken, path, { method = 'GET', b
   }
   if (body != null) headers['Content-Type'] = ACCEPT_HEADER
 
-  const res = await fetch(`${api}${path}`, {
-    method,
-    headers,
-    body: body != null ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(timeoutMs)
-  })
+  const attempt = async () => {
+    const res = await fetch(`${api}${path}`, {
+      method,
+      headers,
+      body: body != null ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs)
+    })
 
-  const data = await safeJson(res)
+    const data = await safeJson(res)
 
-  if (!res.ok) {
-    const detail = data?.errors?.[0]?.userMessage || data?.error_description || data?.message || ''
-    const err = new Error(`HTTP ${res.status}${detail ? ` — ${detail}` : ''}`)
-    err.status = res.status
-    throw err
+    if (!res.ok) {
+      const detail = data?.errors?.[0]?.userMessage || data?.error_description || data?.message || ''
+      const err = new Error(`HTTP ${res.status}${detail ? ` — ${detail}` : ''}`)
+      err.status = res.status
+      throw err
+    }
+    return data
   }
 
-  return data
+  // Retry z backoffem + jitterem — timeouty/blipy sieciowe same się goją,
+  // zamiast wywalać cały przebieg albo zostawać jako „błąd" pojedynczej oferty.
+  let lastErr
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await attempt()
+    } catch (err) {
+      lastErr = err
+      if (i === retries || !isRetryableAllegro(err)) break
+      const wait = retryBaseMs * 2 ** i + Math.floor(Math.random() * retryBaseMs)
+      await _sleep(wait)
+    }
+  }
+  throw lastErr
 }
 
 /** Skrót na GET — zachowany dla dotychczasowych wywołań w tym module. */
 async function apiGet(sandbox, accessToken, path) {
-  return allegroApi(sandbox, accessToken, path, { method: 'GET', timeoutMs: 20000 })
+  return allegroApi(sandbox, accessToken, path, { method: 'GET', timeoutMs: 30000 })
 }
 
 /**

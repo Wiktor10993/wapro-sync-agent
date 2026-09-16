@@ -60,6 +60,7 @@ import * as mappingCsv from './services/mappingCsv.js'
 import * as analytics from './services/analytics.js'
 import * as restockStore from './services/restockStore.js'
 import * as updater from './services/updater.js'
+import { findEcoFolders } from './services/ecoFinder.js'
 import { closeLogger, getLogDirectory, writeLogLine } from './services/fileLogger.js'
 import { createTray, destroyTray, getAutoStart, setAutoStart, updateTrayMenu } from './services/tray.js'
 
@@ -534,6 +535,8 @@ function registerIpc() {
     })
     return result.canceled ? null : result.filePaths[0]
   })
+
+  handle(CH.APP_FIND_ECO_FOLDERS, async () => ({ candidates: findEcoFolders() }))
 
   // --- system ------------------------------------------------------------
   handle(CH.APP_PICK_FOLDER, async () => {

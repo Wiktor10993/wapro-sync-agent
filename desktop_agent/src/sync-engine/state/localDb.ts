@@ -218,6 +218,15 @@ CREATE TABLE IF NOT EXISTS sales_events (
 );
 CREATE INDEX IF NOT EXISTS ix_sales_sku_at ON sales_events(sku, at_ms);
 CREATE INDEX IF NOT EXISTS ix_sales_at ON sales_events(at_ms);
+
+-- v6.1: zamówienia kanałów już przetworzone na deltę stanu WAPRO — dedup, żeby
+-- nie zdjąć stanu dwa razy przy kolejnym cyklu (klucz: kanał + id zamówienia).
+CREATE TABLE IF NOT EXISTS processed_sales (
+  source   TEXT NOT NULL,
+  order_ref TEXT NOT NULL,
+  at_ms    INTEGER NOT NULL,
+  PRIMARY KEY (source, order_ref)
+);
 `
 
 export class LocalDatabase {
@@ -487,6 +496,17 @@ export class LocalDatabase {
   pruneHistory(beforeMs: number): void {
     this.db.prepare('DELETE FROM stock_history WHERE at_ms < ?').run(beforeMs)
     this.db.prepare('DELETE FROM sales_events WHERE at_ms < ?').run(beforeMs)
+  }
+
+  // --- dedup przetworzonych zamówień (v6.1: sprzedaż → delta stanu) -------
+  isSaleProcessed(source: string, orderRef: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM processed_sales WHERE source = ? AND order_ref = ?').get(source, String(orderRef))
+  }
+
+  markSaleProcessed(source: string, orderRef: string): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO processed_sales (source, order_ref, at_ms) VALUES (?, ?, ?)')
+      .run(source, String(orderRef), Date.now())
   }
 
   // --- loop guard (applied deltas) ---------------------------------------
