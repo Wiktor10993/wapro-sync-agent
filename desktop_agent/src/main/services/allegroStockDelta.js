@@ -13,7 +13,7 @@
  */
 
 import { getPool, sql } from '../wapro/pool.js'
-import { getDbSettings } from '../store.js'
+import { getDbSettings, listAllegroAccountsPublic } from '../store.js'
 import { fetchAllegroOrders } from './allegroAuth.js'
 import { getBufferDb } from './bufferDb.js'
 
@@ -41,22 +41,39 @@ async function ensureDeltaTable(pool, log) {
 }
 
 /**
- * Pobiera nowe zamówienia Allegro i dopisuje korekty stanu do bufora WAPRO.
+ * Pobiera nowe zamówienia Allegro ze WSZYSTKICH autoryzowanych kont i dopisuje
+ * korekty stanu do bufora WAPRO. Dedup per konto (source = `allegro:<id>`).
  * @returns {Promise<{fetched:number, applied:number, skipped:number, orders:number}>}
  */
 export async function pullAllegroStockDeltas(log = () => {}) {
-  let forms
-  try {
-    forms = await fetchAllegroOrders({ limit: 100, status: 'READY_FOR_PROCESSING' }, log)
-  } catch (err) {
-    log('warn', `Allegro→WAPRO (stan): pobranie sprzedaży nieudane: ${err.message}`)
-    return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
-  }
-  if (!forms?.length) return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
+  const accounts = listAllegroAccountsPublic().filter((a) => a.authorized)
+  if (accounts.length === 0) return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
 
   const db = await getBufferDb()
   const pool = await getPool(getDbSettings())
   await ensureDeltaTable(pool, log)
+
+  const totals = { fetched: 0, applied: 0, skipped: 0, orders: 0 }
+  for (const a of accounts) {
+    const r = await pullForAccount(a, db, pool, log)
+    totals.fetched += r.fetched
+    totals.applied += r.applied
+    totals.skipped += r.skipped
+    totals.orders += r.orders
+  }
+  return totals
+}
+
+async function pullForAccount(account, db, pool, log) {
+  const source = `allegro:${account.id}`
+  let forms
+  try {
+    forms = await fetchAllegroOrders(account.id, { limit: 100, status: 'READY_FOR_PROCESSING' }, log)
+  } catch (err) {
+    log('warn', `Allegro→WAPRO (stan) konto „${account.label}": pobranie sprzedaży nieudane: ${err.message}`)
+    return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
+  }
+  if (!forms?.length) return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
 
   let applied = 0
   let skipped = 0
@@ -65,12 +82,11 @@ export async function pullAllegroStockDeltas(log = () => {}) {
   for (const f of forms) {
     const ref = String(f?.id ?? '')
     if (!ref) continue
-    if (db.isSaleProcessed('allegro', ref)) {
+    if (db.isSaleProcessed(source, ref)) {
       skipped++
       continue
     }
 
-    // Zbierz pozycje (SKU = sygnatura oferty = indeks WAPRO).
     const lines = []
     for (const li of f?.lineItems ?? []) {
       const sku = String(li?.offer?.external?.id ?? '').trim()
@@ -78,12 +94,10 @@ export async function pullAllegroStockDeltas(log = () => {}) {
       if (sku && qty > 0) lines.push({ sku, qty })
     }
     if (lines.length === 0) {
-      // Zamówienie bez rozpoznawalnego SKU — oznacz jako przetworzone, żeby nie wracało.
-      db.markSaleProcessed('allegro', ref)
+      db.markSaleProcessed(source, ref)
       continue
     }
 
-    // Atomowo: albo wszystkie pozycje zamówienia, albo nic.
     const tx = new sql.Transaction(pool)
     try {
       await tx.begin()
@@ -93,22 +107,21 @@ export async function pullAllegroStockDeltas(log = () => {}) {
           .input('ean', sql.VarChar(32), null)
           .input('delta', sql.Int, -ln.qty)
           .input('target', sql.Int, null)
-          .input('reason', sql.NVarChar(200), `Allegro sprzedaż ${ref}`)
+          .input('reason', sql.NVarChar(200), `Allegro (${account.label}) sprzedaż ${ref}`)
           .query(`INSERT INTO ${DELTA_TABLE} (SKU, EAN, DELTA_QTY, TARGET_QTY, REASON) VALUES (@sku, @ean, @delta, @target, @reason)`)
       }
       await tx.commit()
-      db.markSaleProcessed('allegro', ref)
+      db.markSaleProcessed(source, ref)
       applied += lines.length
       orders++
     } catch (err) {
       await tx.rollback().catch(() => {})
-      log('warn', `Allegro→WAPRO: zamówienie ${ref} nie zapisane (${err.message}) — ponowię w kolejnym cyklu.`)
+      log('warn', `Allegro→WAPRO konto „${account.label}": zamówienie ${ref} nie zapisane (${err.message}) — ponowię w kolejnym cyklu.`)
     }
   }
 
-  log(
-    applied > 0 ? 'success' : 'info',
-    `Allegro→WAPRO: zdjęto stan (delta) dla ${applied} pozycji z ${orders} nowych zamówień (pominięto ${skipped} już przetworzonych).`
-  )
+  if (applied > 0 || orders > 0) {
+    log('success', `Allegro→WAPRO „${account.label}": zdjęto stan dla ${applied} pozycji z ${orders} zamówień (pominięto ${skipped}).`)
+  }
   return { fetched: forms.length, applied, skipped, orders }
 }

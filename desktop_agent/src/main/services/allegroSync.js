@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { getIntegrations } from '../store.js'
+import { getAllegroAccount, listAllegroAccountsPublic } from '../store.js'
 import { allegroApi, getValidAccessToken, interpretAllegroError } from './allegroAuth.js'
 import { buildNameIndex, extractEanFromOffer, pickOfferId } from './allegroSyncCore.js'
 
@@ -10,15 +10,10 @@ export { buildNameIndex, extractEanFromOffer, normalizeTitle, pickOfferId } from
  * SYNCHRONIZACJA STANÓW WAPRO → ALLEGRO (bezpośrednio, bez BaseLinkera)
  * ====================================================================
  *
- * Wapro Mag jest jedynym źródłem prawdy dla stanów. Ten moduł:
- *   1) pobiera oferty sprzedawcy z Allegro (`GET /sale/offers`, stronicowane),
- *   2) buduje mapę kod → offerId, dopasowując po SYGNATURZE (external.id = SKU
- *      ustawiony przez sprzedawcę) oraz — gdy dostępny — po EAN/GTIN oferty,
- *   3) ustawia nowy stan oferty (`PATCH /sale/product-offers/{offerId}`
- *      z ciałem `{ stock: { available } }`).
- *
- * Token odświeżamy automatycznie przez `getValidAccessToken` (refresh_token),
- * więc harmonogram działa bez ręcznej reautoryzacji.
+ * Wapro Mag jest jedynym źródłem prawdy dla stanów. Obsługujemy WIELE kont
+ * Allegro (ta sama aplikacja, osobne autoryzacje) — każda funkcja przyjmuje
+ * `accountId` (domyślnie 'primary' = konto główne). Token i sandbox rozwiązujemy
+ * per konto; mapa ofert jest cache'owana osobno dla każdego konta.
  */
 
 const OFFERS_PAGE_LIMIT = 1000 // maksimum akceptowane przez /sale/offers
@@ -32,6 +27,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** Oddaje wątek zdarzeń — długa pętla nie zamraża UI procesu głównego. */
 const yieldToEventLoop = () => new Promise((r) => setImmediate(r))
 
+/** Token + sandbox dla danego konta. */
+async function resolveCtx(accountId, log) {
+  const token = await getValidAccessToken(accountId, log)
+  const sandbox = Boolean(getAllegroAccount(accountId)?.sandbox)
+  return { token, sandbox }
+}
+
 /** Czy błąd oznacza „oferty już nie ma" (zakończona/zarchiwizowana/404). */
 function isOfferGone(err) {
   const e = err || {}
@@ -43,17 +45,19 @@ function isOfferGone(err) {
 }
 
 // ---------------------------------------------------------------------------
-// Mapa ofert (z cache'em)
+// Mapa ofert (z cache'em per konto)
 // ---------------------------------------------------------------------------
 
-let _offerCache = { maps: null, at: 0 }
+/** @type {Map<string, {maps:any, at:number}>} cache map ofert per accountId */
+const _offerCache = new Map()
 
-/** Wymusza przebudowę mapy ofert przy następnym użyciu. */
-export function invalidateOfferMap() {
-  _offerCache = { maps: null, at: 0 }
+/** Wymusza przebudowę mapy ofert (dla konta albo wszystkich). */
+export function invalidateOfferMap(accountId = null) {
+  if (accountId) _offerCache.delete(accountId)
+  else _offerCache.clear()
 }
 
-async function buildOfferMaps(sandbox, token, log) {
+async function buildOfferMaps(sandbox, token) {
   const bySku = new Map()
   const byEan = new Map()
   const collected = [] // {id, name} do indeksu po tytule (potrzebuje całości)
@@ -83,20 +87,19 @@ async function buildOfferMaps(sandbox, token, log) {
     if (total != null && offset >= total) break
   }
 
-  // Indeks po tytule budujemy z całości (wykrycie niejednoznacznych tytułów).
   const byName = buildNameIndex(collected)
-
   console.log(
     `[Allegro] Zbudowano mapę ofert: ${bySku.size} po SKU, ${byEan.size} po EAN, ${byName.size} po unikalnym tytule (z ${collected.length} ofert).`
   )
   return { bySku, byEan, byName }
 }
 
-async function getOfferMaps(sandbox, token, log, { force = false } = {}) {
-  const fresh = _offerCache.maps && Date.now() - _offerCache.at < OFFER_MAP_TTL_MS
-  if (fresh && !force) return _offerCache.maps
-  const maps = await buildOfferMaps(sandbox, token, log)
-  _offerCache = { maps, at: Date.now() }
+async function getOfferMaps(accountId, sandbox, token, { force = false } = {}) {
+  const cached = _offerCache.get(accountId)
+  const fresh = cached?.maps && Date.now() - cached.at < OFFER_MAP_TTL_MS
+  if (fresh && !force) return cached.maps
+  const maps = await buildOfferMaps(sandbox, token)
+  _offerCache.set(accountId, { maps, at: Date.now() })
   return maps
 }
 
@@ -104,10 +107,7 @@ async function getOfferMaps(sandbox, token, log, { force = false } = {}) {
 // Aktualizacja stanu oferty
 // ---------------------------------------------------------------------------
 
-/**
- * Ustawia stan pojedynczej oferty.
- * `PATCH /sale/product-offers/{offerId}` z ciałem `{ stock: { available } }`.
- */
+/** `PATCH /sale/product-offers/{offerId}` z ciałem `{ stock: { available } }`. */
 async function setOfferStock(sandbox, token, offerId, quantity) {
   const available = Math.max(0, Math.trunc(Number(quantity) || 0))
   return allegroApi(sandbox, token, `/sale/product-offers/${encodeURIComponent(offerId)}`, {
@@ -116,13 +116,7 @@ async function setOfferStock(sandbox, token, offerId, quantity) {
   })
 }
 
-/**
- * Zmienia status publikacji oferty (END = zakończ / ACTIVATE = wznów) przez
- * `PUT /sale/offer-publication-commands/{commandId}`. commandId to UUID generowany
- * po naszej stronie — dzięki temu operacja jest IDEMPOTENTNA (powtórka nie duplikuje).
- *
- * @param {'END'|'ACTIVATE'} action
- */
+/** Zmiana statusu publikacji (END/ACTIVATE) przez idempotentny command (UUID). */
 async function setOfferPublication(sandbox, token, offerId, action) {
   const commandId = randomUUID()
   return allegroApi(sandbox, token, `/sale/offer-publication-commands/${commandId}`, {
@@ -134,47 +128,32 @@ async function setOfferPublication(sandbox, token, offerId, action) {
   })
 }
 
-/**
- * Kończy ofertę (stan ≤ 0). WAPRO jest źródłem prawdy — jeśli nie ma towaru,
- * aukcja nie może wisieć aktywna. Rzuca błędem przy niepowodzeniu.
- */
-export async function endOffer(offerId, log = () => {}) {
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
-  await setOfferPublication(Boolean(allegro.sandbox), token, offerId, 'END')
-  log('info', `Allegro: zakończono ofertę ${offerId} (stan ≤ 0).`)
+/** Kończy ofertę (stan ≤ 0). Rzuca błędem przy niepowodzeniu. */
+export async function endOffer(accountId, offerId, log = () => {}) {
+  const { token, sandbox } = await resolveCtx(accountId, log)
+  await setOfferPublication(sandbox, token, offerId, 'END')
+  log('info', `Allegro[${accountId}]: zakończono ofertę ${offerId} (stan ≤ 0).`)
 }
 
-/**
- * Wznawia zakończoną ofertę (towar wrócił). Zwraca true przy sukcesie; przy
- * ofercie wygasłej/usuniętej (której nie da się aktywować) zwraca false, żeby
- * warstwa wyżej mogła oznaczyć „Wystaw ponownie" (needs_relist).
- */
-export async function activateOffer(offerId, log = () => {}) {
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
+/** Wznawia zakończoną ofertę. true = sukces; false = nie da się (needs_relist). */
+export async function activateOffer(accountId, offerId, log = () => {}) {
+  const { token, sandbox } = await resolveCtx(accountId, log)
   try {
-    await setOfferPublication(Boolean(allegro.sandbox), token, offerId, 'ACTIVATE')
-    log('info', `Allegro: wznowiono ofertę ${offerId} (towar wrócił).`)
+    await setOfferPublication(sandbox, token, offerId, 'ACTIVATE')
+    log('info', `Allegro[${accountId}]: wznowiono ofertę ${offerId} (towar wrócił).`)
     return true
   } catch (err) {
     if (isOfferGone(err)) {
-      log('warn', `Allegro: oferty ${offerId} nie można wznowić (wygasła/usunięta) — wymaga ponownego wystawienia.`)
+      log('warn', `Allegro[${accountId}]: oferty ${offerId} nie można wznowić (wygasła/usunięta) — wymaga ponownego wystawienia.`)
       return false
     }
     throw err
   }
 }
 
-/**
- * Surowa lista ofert w kształcie OfferCandidate — dla nowego silnika (orchestrator).
- * @returns {Promise<Array<{offerId:string, sku:string, ean:string, name:string}>>}
- */
-export async function listOffers(log = () => {}) {
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
-  const sandbox = Boolean(allegro.sandbox)
-
+/** Surowa lista ofert (offerId/sku/ean/name) — dla silnika. */
+export async function listOffers(accountId = 'primary', log = () => {}) {
+  const { token, sandbox } = await resolveCtx(accountId, log)
   const out = []
   let offset = 0
   let total = null
@@ -198,15 +177,9 @@ export async function listOffers(log = () => {}) {
   return out
 }
 
-/**
- * Lista ofert wraz z dostępnym stanem — do eksportu CSV i raportu martwych stanów.
- * @returns {Promise<Array<{offerId:string, sku:string, ean:string, name:string, quantity:number, status:string}>>}
- */
-export async function listOffersWithStock(log = () => {}) {
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
-  const sandbox = Boolean(allegro.sandbox)
-
+/** Lista ofert wraz ze stanem — do eksportu CSV i raportu. */
+export async function listOffersWithStock(accountId = 'primary', log = () => {}) {
+  const { token, sandbox } = await resolveCtx(accountId, log)
   const out = []
   let offset = 0
   let total = null
@@ -232,27 +205,30 @@ export async function listOffersWithStock(log = () => {}) {
   return out
 }
 
-/**
- * Ustawia stan JEDNEJ oferty i RZUCA surowym błędem Allegro przy niepowodzeniu
- * (status/kod) — używane przez ChannelPort w Action Center, żeby błąd trafił do
- * kolejki „Błędy synchronizacji", a nie zniknął.
- */
-export async function setSingleOfferStock(offerId, quantity, log = () => {}) {
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
-  await setOfferStock(Boolean(allegro.sandbox), token, offerId, quantity)
+/** Oferty ze stanem ze WSZYSTKICH autoryzowanych kont (eksport/raport). */
+export async function listOffersWithStockAll(log = () => {}) {
+  const accounts = listAllegroAccountsPublic().filter((a) => a.authorized)
+  const out = []
+  for (const a of accounts) {
+    try {
+      const offers = await listOffersWithStock(a.id, log)
+      for (const o of offers) out.push({ ...o, accountId: a.id, accountLabel: a.label })
+    } catch (err) {
+      log('warn', `Allegro[${a.id}]: pobranie ofert nieudane: ${err.message}`)
+    }
+  }
+  return out
 }
 
-/**
- * Ustawia stan wskazanych ofert (po offerId). Zwraca zbiór offerId, które
- * faktycznie zaktualizowano — dla orchestratora (zatwierdzanie hashy).
- * @returns {Promise<Set<string>>}
- */
-export async function setOffersStock(items, log = () => {}) {
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
-  const sandbox = Boolean(allegro.sandbox)
+/** Ustawia stan JEDNEJ oferty i RZUCA surowym błędem (dla Action Center). */
+export async function setSingleOfferStock(accountId, offerId, quantity, log = () => {}) {
+  const { token, sandbox } = await resolveCtx(accountId, log)
+  await setOfferStock(sandbox, token, offerId, quantity)
+}
 
+/** Ustawia stan wskazanych ofert. Zwraca zbiór zaktualizowanych offerId. */
+export async function setOffersStock(accountId, items, log = () => {}) {
+  const { token, sandbox } = await resolveCtx(accountId, log)
   const list = items ?? []
   const updated = new Set()
   for (let i = 0; i < list.length; i++) {
@@ -261,9 +237,8 @@ export async function setOffersStock(items, log = () => {}) {
       await setOfferStock(sandbox, token, it.offerId, it.quantity)
       updated.add(String(it.offerId))
     } catch (err) {
-      log('warn', `Allegro: oferta ${it.offerId} — ${interpretAllegroError(err)}`)
+      log('warn', `Allegro[${accountId}]: oferta ${it.offerId} — ${interpretAllegroError(err)}`)
     }
-    // Throttling + oddanie wątku co paczkę — UI nie zamarza przy tysiącach ofert.
     if ((i + 1) % OFFER_PUSH_BATCH === 0 && i + 1 < list.length) {
       await sleep(OFFER_PUSH_DELAY_MS)
       await yieldToEventLoop()
@@ -276,33 +251,23 @@ export async function setOffersStock(items, log = () => {}) {
 const VIA_LABEL = { ean: 'EAN', sku: 'SKU', title: 'Tytuł' }
 
 /**
- * Aktualizuje stany ofert na podstawie pozycji z Wapro. Dopasowanie
- * wielopoziomowe: EAN → SKU → Tytuł (patrz pickOfferId).
- *
- * Zwraca kształt zgodny z BaseLinkerowym updaterem: pole `unmapped` zawiera
- * kody NIEZAKTUALIZOWANE (bez dopasowania LUB z błędem wysyłki), żeby warstwa
- * synchronizacji nie zapisała ich hasha i ponowiła w kolejnym cyklu.
- *
- * @param {Array<{sku:string, barcode?:string, name?:string, quantity:number}>} rows
+ * Aktualizuje stany ofert konta na podstawie pozycji z Wapro (EAN → SKU → Tytuł).
  * @returns {Promise<{updated:number, unmapped:string[], viaEan:number, viaSku:number, viaTitle:number, failed:number}>}
  */
-export async function updateOfferStockByCode(rows, log = () => {}) {
+export async function updateOfferStockByCode(accountId, rows, log = () => {}) {
   if (!rows?.length) return { updated: 0, unmapped: [], viaEan: 0, viaSku: 0, viaTitle: 0, failed: 0 }
 
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
-  const sandbox = Boolean(allegro.sandbox)
+  const { token, sandbox } = await resolveCtx(accountId, log)
 
   const asItem = (r) => ({ sku: r.sku, barcode: r.barcode, name: r.name })
   const label = (r) => String(r.sku || r.barcode || r.name || '?')
 
-  let maps = await getOfferMaps(sandbox, token, log)
+  let maps = await getOfferMaps(accountId, sandbox, token)
 
-  // Pierwsze rozwiązanie; gdy część pozycji nie trafia, odświeżamy mapę raz.
   const resolve = () => rows.map((r) => ({ code: label(r), quantity: r.quantity, hit: pickOfferId(maps, asItem(r)) }))
   let resolved = resolve()
   if (resolved.some((r) => !r.hit)) {
-    maps = await getOfferMaps(sandbox, token, log, { force: true })
+    maps = await getOfferMaps(accountId, sandbox, token, { force: true })
     resolved = resolve()
   }
 
@@ -322,50 +287,33 @@ export async function updateOfferStockByCode(rows, log = () => {}) {
       await setOfferStock(sandbox, token, r.hit.offerId, r.quantity)
       updated++
       viaCount[r.hit.via] = (viaCount[r.hit.via] || 0) + 1
-      console.log(
-        `[Allegro] → stock offer ${r.hit.offerId} (kod ${r.code}, klucz ${VIA_LABEL[r.hit.via]}) = ${Math.max(0, Math.trunc(Number(r.quantity) || 0))}`
-      )
     } catch (err) {
-      // „0 na stanie (Archiwum)": towar 0 szt., a oferty już nie ma — pomijamy,
-      // to nie jest krytyczny błąd synchronizacji.
       if (Number(r.quantity) === 0 && isOfferGone(err)) {
         archivedZero++
-        log('info', `Allegro: ${r.code} — oferta wycofana, stan 0 → pomijam (Archiwum).`)
+        log('info', `Allegro[${accountId}]: ${r.code} — oferta wycofana, stan 0 → pomijam (Archiwum).`)
       } else {
         failed++
         notUpdated.push(r.code)
-        log('warn', `Allegro: oferta ${r.hit.offerId} (kod ${r.code}) — ${interpretAllegroError(err)}`)
+        log('warn', `Allegro[${accountId}]: oferta ${r.hit.offerId} (kod ${r.code}) — ${interpretAllegroError(err)}`)
       }
     }
-    // Throttling + oddanie wątku co paczkę.
     if ((i + 1) % OFFER_PUSH_BATCH === 0 && i + 1 < resolved.length) {
       await sleep(OFFER_PUSH_DELAY_MS)
       await yieldToEventLoop()
     }
   }
 
-  // Zbiorczy log z rozbiciem po kluczu dopasowania.
   if (updated > 0) {
-    log(
-      'success',
-      `Allegro: zaktualizowano ${updated} ofert (EAN: ${viaCount.ean}, SKU: ${viaCount.sku}, Tytuł: ${viaCount.title}).`
-    )
+    log('success', `Allegro[${accountId}]: zaktualizowano ${updated} ofert (EAN: ${viaCount.ean}, SKU: ${viaCount.sku}, Tytuł: ${viaCount.title}).`)
   }
   if (archivedZero > 0) {
-    log('info', `Allegro: ${archivedZero} pozycji „0 na stanie (Archiwum)" — pominięto (oferta wycofana).`)
+    log('info', `Allegro[${accountId}]: ${archivedZero} pozycji „0 na stanie (Archiwum)" — pominięto.`)
   }
   const unmappedCount = notUpdated.length - failed
   if (unmappedCount > 0) {
     const sample = notUpdated.slice(0, 5).join(', ')
-    log('warn', `Allegro: ${unmappedCount} pozycji bez oferty (ani EAN, ani SKU, ani tytuł; np. ${sample}).`)
+    log('warn', `Allegro[${accountId}]: ${unmappedCount} pozycji bez oferty (np. ${sample}).`)
   }
 
-  return {
-    updated,
-    unmapped: notUpdated,
-    viaEan: viaCount.ean,
-    viaSku: viaCount.sku,
-    viaTitle: viaCount.title,
-    failed
-  }
+  return { updated, unmapped: notUpdated, viaEan: viaCount.ean, viaSku: viaCount.sku, viaTitle: viaCount.title, failed }
 }

@@ -395,6 +395,9 @@ export default function IntegrationsTab({ busy, run }) {
         </div>
       </form>
 
+      {/* ================= Dodatkowe konta Allegro ================= */}
+      <AllegroAccountsCard busy={busy} run={run} />
+
       {/* ================= Podgląd pobranych zamówień ================= */}
       {preview && (
         <section className="card card--wide">
@@ -472,6 +475,90 @@ function ConnectionBadge({ status, label }) {
   if (status.lastCheckOk === true) return <Tag tone="ok">połączono</Tag>
   if (status.lastCheckOk === false) return <Tag tone="error">błąd</Tag>
   return <Tag tone="warn">niesprawdzone</Tag>
+}
+
+/**
+ * Zarządzanie dodatkowymi kontami Allegro (ta sama aplikacja, osobne autoryzacje).
+ * Konto główne konfiguruje się w sekcji „Allegro" wyżej; tu konta 2..N.
+ */
+function AllegroAccountsCard({ busy, run }) {
+  const [accounts, setAccounts] = useState([])
+
+  const reload = useCallback(async () => {
+    const r = await window.agent.listAllegroAccounts()
+    if (r.ok) setAccounts(r.data || [])
+  }, [])
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const extras = accounts.filter((a) => a.id !== 'primary')
+
+  const add = async () => {
+    const label = (window.prompt('Nazwa nowego konta Allegro (np. „Konto firmowe 2"):') || '').trim()
+    const r = await run('al-add', () => window.agent.addAllegroAccount(label))
+    if (r?.accounts) setAccounts(r.accounts)
+    else reload()
+  }
+  const authorize = async (id) => {
+    const r = await run(`al-auth-${id}`, () => window.agent.authorizeAllegro(id))
+    if (r?.accounts) setAccounts(r.accounts)
+    else reload()
+  }
+  const test = async (id) => {
+    await run(`al-test-${id}`, () => window.agent.testAllegro(id))
+    reload()
+  }
+  const remove = async (id) => {
+    if (!window.confirm('Usunąć to konto Allegro? Tokeny zostaną skasowane.')) return
+    const r = await run(`al-del-${id}`, () => window.agent.disconnectAllegro(id))
+    if (r?.accounts) setAccounts(r.accounts)
+    else reload()
+  }
+
+  return (
+    <section className="card">
+      <div className="card__header">
+        <h2>Dodatkowe konta Allegro</h2>
+      </div>
+      <p className="hint">
+        Ta sama aplikacja Allegro (Client ID/Secret z sekcji wyżej), ale osobne konta sprzedawcy — każde z własną
+        autoryzacją. Stany z WAPRO lecą na wszystkie konta; zamówienia z każdego konta zdejmują stan w WAPRO.
+      </p>
+
+      {extras.length === 0 && (
+        <p className="empty-state">Brak dodatkowych kont. Konto główne skonfigurujesz w sekcji „Allegro" powyżej.</p>
+      )}
+
+      {extras.map((a) => (
+        <div key={a.id} className="account-row">
+          <div className="account-row__info">
+            <strong>{a.label}</strong>{' '}
+            {a.authorized ? (
+              <Tag tone="ok">połączone{a.accountLogin ? ` — ${a.accountLogin}` : ''}</Tag>
+            ) : (
+              <Tag tone="warn">niepołączone</Tag>
+            )}
+            {a.tokenExpired && <Tag tone="warn">token wygasł</Tag>}
+          </div>
+          <div className="button-row">
+            <button type="button" className="btn btn--tiny" disabled={busy === `al-auth-${a.id}`} onClick={() => authorize(a.id)}>
+              {busy === `al-auth-${a.id}` ? 'Czekam…' : a.authorized ? 'Autoryzuj ponownie' : 'Autoryzuj'}
+            </button>
+            <button type="button" className="btn btn--tiny" disabled={busy === `al-test-${a.id}` || !a.authorized} onClick={() => test(a.id)}>
+              Testuj
+            </button>
+            <button type="button" className="btn btn--tiny" onClick={() => remove(a.id)}>Usuń</button>
+          </div>
+        </div>
+      ))}
+
+      <div className="button-row" style={{ marginTop: 10 }}>
+        <button type="button" className="btn" disabled={busy === 'al-add'} onClick={add}>+ Dodaj konto Allegro</button>
+      </div>
+    </section>
+  )
 }
 
 function AllegroBadge({ status }) {

@@ -18,6 +18,7 @@ import { getBufferDb } from './bufferDb.js'
 import { snapshotWapro } from './exportService.js'
 import * as blApi from './baselinkerApi.js'
 import { fetchAllegroOrders } from './allegroAuth.js'
+import { listAllegroAccountsPublic } from '../store.js'
 
 const DAY = 86_400_000
 const SNAPSHOT_MIN_INTERVAL_MS = 60 * 60 * 1000 // najwyżej 1 snapshot/godzinę
@@ -77,21 +78,24 @@ export async function ingestOrders({ days = 60 } = {}, log = () => {}) {
     log('warn', `Ingest BaseLinker: ${err?.message ?? err}`)
   }
 
-  // --- Allegro ---
-  try {
-    const forms = await fetchAllegroOrders({ limit: 100, status: '' }, log)
-    const events = []
-    for (const f of forms ?? []) {
-      const atMs = Date.parse(f?.lineItems?.[0]?.boughtAt ?? f?.updatedAt ?? f?.revision?.createdAt ?? '') || Date.now()
-      for (const li of f?.lineItems ?? []) {
-        const sku = String(li?.offer?.external?.id ?? '').trim()
-        if (!sku) continue
-        events.push({ sku, ean: '', qty: Number(li?.quantity) || 0, source: 'allegro', ref: `${f.id}:${li?.id ?? sku}`, atMs })
+  // --- Allegro (wszystkie autoryzowane konta) ---
+  for (const acc of listAllegroAccountsPublic().filter((a) => a.authorized)) {
+    try {
+      const forms = await fetchAllegroOrders(acc.id, { limit: 100, status: '' }, log)
+      const events = []
+      for (const f of forms ?? []) {
+        const atMs = Date.parse(f?.lineItems?.[0]?.boughtAt ?? f?.updatedAt ?? f?.revision?.createdAt ?? '') || Date.now()
+        for (const li of f?.lineItems ?? []) {
+          const sku = String(li?.offer?.external?.id ?? '').trim()
+          if (!sku) continue
+          // source 'allegro' (nie per-konto) — żeby analityka prędkości to łapała.
+          events.push({ sku, ean: '', qty: Number(li?.quantity) || 0, source: 'allegro', ref: `${f.id}:${li?.id ?? sku}`, atMs })
+        }
       }
+      al += db.recordSales(events)
+    } catch (err) {
+      log('warn', `Ingest Allegro „${acc.label}": ${err?.message ?? err}`)
     }
-    al = db.recordSales(events)
-  } catch (err) {
-    log('warn', `Ingest Allegro: ${err?.message ?? err}`)
   }
 
   log('success', `Historia sprzedaży: dodano ${bl} pozycji z BaseLinker, ${al} z Allegro (okno ${days} dni).`)

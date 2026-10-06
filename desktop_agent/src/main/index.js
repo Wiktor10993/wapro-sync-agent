@@ -10,6 +10,8 @@ import {
   getPublicSettings,
   getSchemaMap,
   getSyncSettings,
+  listAllegroAccountsPublic,
+  addAllegroAccount,
   resetStockCache,
   saveAllegroSettings,
   saveAppearance,
@@ -389,16 +391,23 @@ function registerIpc() {
     testBaseLinkerConnection(token, log)
   )
 
-  handle(CH.INTEGRATIONS_TEST_ALLEGRO, async () => testAllegroConnection(log))
+  handle(CH.INTEGRATIONS_TEST_ALLEGRO, async ({ accountId = 'primary' } = {}) => testAllegroConnection(accountId, log))
 
-  handle(CH.INTEGRATIONS_ALLEGRO_AUTHORIZE, async () => {
-    const result = await authorizeAllegro(log)
-    return { ...result, integrations: getPublicIntegrations() }
+  handle(CH.INTEGRATIONS_ALLEGRO_AUTHORIZE, async ({ accountId = 'primary' } = {}) => {
+    const result = await authorizeAllegro(accountId, log)
+    return { ...result, integrations: getPublicIntegrations(), accounts: listAllegroAccountsPublic() }
   })
 
-  handle(CH.INTEGRATIONS_ALLEGRO_DISCONNECT, async () => {
-    disconnectAllegro(log)
-    return getPublicIntegrations()
+  handle(CH.INTEGRATIONS_ALLEGRO_DISCONNECT, async ({ accountId = 'primary' } = {}) => {
+    disconnectAllegro(accountId, log)
+    return { integrations: getPublicIntegrations(), accounts: listAllegroAccountsPublic() }
+  })
+
+  // Wiele kont Allegro
+  handle(CH.INTEGRATIONS_ALLEGRO_LIST_ACCOUNTS, async () => listAllegroAccountsPublic())
+  handle(CH.INTEGRATIONS_ALLEGRO_ADD_ACCOUNT, async ({ label } = {}) => {
+    const { id } = addAllegroAccount(label)
+    return { id, accounts: listAllegroAccountsPublic() }
   })
 
   handle(CH.INTEGRATIONS_BL_ORDERS, async (opts = {}) => {
@@ -418,8 +427,8 @@ function registerIpc() {
 
   handle(CH.INTEGRATIONS_BL_STATUSES, async () => getOrderStatusList(log))
 
-  handle(CH.INTEGRATIONS_ALLEGRO_ORDERS, async (opts = {}) => {
-    const orders = await fetchAllegroOrders(opts, log)
+  handle(CH.INTEGRATIONS_ALLEGRO_ORDERS, async ({ accountId = 'primary', ...opts } = {}) => {
+    const orders = await fetchAllegroOrders(accountId, opts, log)
     return {
       count: orders.length,
       sample: orders.slice(0, 20).map((o) => ({

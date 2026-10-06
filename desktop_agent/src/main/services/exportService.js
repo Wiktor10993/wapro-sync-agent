@@ -62,14 +62,15 @@ export async function snapshotWapro() {
 }
 
 export async function snapshotAllegro(log = () => {}) {
-  const offers = await allegroSync.listOffersWithStock(log)
+  // Wszystkie autoryzowane konta Allegro razem (kolumna magazyn = etykieta konta).
+  const offers = await allegroSync.listOffersWithStockAll(log)
   return offers.map((o) => ({
     id: o.offerId,
     sku: o.sku ?? '',
     ean: o.ean ?? '',
     name: o.name ?? '',
     quantity: Math.trunc(Number(o.quantity) || 0),
-    warehouse: 'allegro'
+    warehouse: o.accountLabel ? `allegro:${o.accountLabel}` : 'allegro'
   }))
 }
 

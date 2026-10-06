@@ -39,6 +39,8 @@ export const CH = {
   INTEGRATIONS_TEST_ALLEGRO: 'integrations:test-allegro',
   INTEGRATIONS_ALLEGRO_AUTHORIZE: 'integrations:allegro-authorize',
   INTEGRATIONS_ALLEGRO_DISCONNECT: 'integrations:allegro-disconnect',
+  INTEGRATIONS_ALLEGRO_LIST_ACCOUNTS: 'integrations:allegro-list-accounts',
+  INTEGRATIONS_ALLEGRO_ADD_ACCOUNT: 'integrations:allegro-add-account',
   INTEGRATIONS_BL_ORDERS: 'integrations:baselinker-orders',
   INTEGRATIONS_BL_STATUSES: 'integrations:baselinker-statuses',
   INTEGRATIONS_ALLEGRO_ORDERS: 'integrations:allegro-orders',

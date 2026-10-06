@@ -117,7 +117,10 @@ const schema = {
         accountLogin: '',
         lastCheckAt: null,
         lastCheckOk: null,
-        lastCheckMessage: ''
+        lastCheckMessage: '',
+        // Dodatkowe konta Allegro (ta sama aplikacja, osobne autoryzacje/tokeny).
+        // Konto „główne" to pola powyżej (id = 'primary'); tu konta 2..N.
+        extraAccounts: []
       }
     }
   },
@@ -135,7 +138,9 @@ const schema = {
       // BaseLinker i na Allegro liczą zmiany niezależnie (włączenie jednego
       // kanału nie „zjada" zmian drugiego).
       stockHashesAllegro: {},
-      lastSyncUpAllegroAt: null
+      lastSyncUpAllegroAt: null,
+      // Hashe stanów dla dodatkowych kont Allegro: { [accountId]: { sku: hash } }.
+      stockHashesAllegroExtra: {}
     }
   }
 }
@@ -487,6 +492,146 @@ export function clearAllegroTokens() {
   return getPublicIntegrations()
 }
 
+// ===========================================================================
+// Multi-konto Allegro: konto główne (id 'primary' = pola płaskie powyżej)
+// + extraAccounts[] (konta 2..N, ta sama aplikacja, osobne tokeny).
+// ===========================================================================
+
+function genAccountId() {
+  return 'acc_' + Math.random().toString(36).slice(2, 10)
+}
+
+/** Lista kont Allegro BEZ sekretów — do UI. */
+export function listAllegroAccountsPublic() {
+  const al = store.get('integrations').allegro ?? {}
+  const mapOne = (src, id, fallbackLabel) => {
+    const access = decryptSecret(src.accessTokenEnc, src.accessTokenPlain)
+    const refresh = decryptSecret(src.refreshTokenEnc, src.refreshTokenPlain)
+    const exp = src.expiresAt ? new Date(src.expiresAt).getTime() : 0
+    return {
+      id,
+      label: src.label || src.accountLogin || fallbackLabel,
+      authorized: Boolean(access),
+      hasRefreshToken: Boolean(refresh),
+      tokenExpired: exp > 0 && exp <= Date.now(),
+      accountLogin: src.accountLogin ?? '',
+      lastCheckAt: src.lastCheckAt ?? null,
+      lastCheckOk: src.lastCheckOk ?? null,
+      lastCheckMessage: src.lastCheckMessage ?? ''
+    }
+  }
+  const out = [mapOne(al, 'primary', 'Konto główne')]
+  for (const ex of al.extraAccounts ?? []) out.push(mapOne(ex, ex.id, 'Konto'))
+  return out
+}
+
+/** Pełne dane konta (opcjonalnie z sekretami) — do użytku wewnętrznego (auth/API). */
+export function getAllegroAccount(accountId = 'primary', { withSecrets = false } = {}) {
+  const al = store.get('integrations').allegro ?? {}
+  const shared = {
+    clientId: al.clientId ?? '',
+    redirectUri: al.redirectUri ?? 'http://localhost:8123/callback',
+    sandbox: Boolean(al.sandbox)
+  }
+  if (withSecrets) shared.clientSecret = decryptSecret(al.clientSecretEnc, al.clientSecretPlain)
+
+  const src = !accountId || accountId === 'primary' ? al : (al.extraAccounts ?? []).find((a) => a.id === accountId)
+  if (!src) return null
+
+  const base = {
+    id: !accountId || accountId === 'primary' ? 'primary' : src.id,
+    label: src.label || src.accountLogin || (accountId === 'primary' ? 'Konto główne' : 'Konto'),
+    ...shared,
+    expiresAt: src.expiresAt ?? null,
+    scope: src.scope ?? '',
+    accountLogin: src.accountLogin ?? ''
+  }
+  if (withSecrets) {
+    base.accessToken = decryptSecret(src.accessTokenEnc, src.accessTokenPlain)
+    base.refreshToken = decryptSecret(src.refreshTokenEnc, src.refreshTokenPlain)
+  }
+  return base
+}
+
+/** Dodaje puste dodatkowe konto; zwraca { id }. */
+export function addAllegroAccount(label = '') {
+  const current = store.get('integrations')
+  const al = { ...current.allegro }
+  const extra = Array.isArray(al.extraAccounts) ? [...al.extraAccounts] : []
+  const id = genAccountId()
+  extra.push({
+    id,
+    label: String(label || '').trim() || `Konto ${extra.length + 2}`,
+    accessTokenEnc: '', accessTokenPlain: '', refreshTokenEnc: '', refreshTokenPlain: '',
+    expiresAt: null, scope: '', authorizedAt: null, accountLogin: '',
+    lastCheckAt: null, lastCheckOk: null, lastCheckMessage: ''
+  })
+  al.extraAccounts = extra
+  store.set('integrations', { ...current, allegro: al })
+  return { id }
+}
+
+/** Usuwa konto. 'primary' → tylko czyści tokeny (konta głównego nie kasujemy). */
+export function removeAllegroAccount(accountId) {
+  if (!accountId || accountId === 'primary') return clearAllegroTokens()
+  const current = store.get('integrations')
+  const al = { ...current.allegro }
+  al.extraAccounts = (al.extraAccounts ?? []).filter((a) => a.id !== accountId)
+  store.set('integrations', { ...current, allegro: al })
+  const extra = { ...(store.get('cache.stockHashesAllegroExtra') || {}) }
+  delete extra[accountId]
+  store.set('cache.stockHashesAllegroExtra', extra)
+  return getPublicIntegrations()
+}
+
+/** Zapis tokenów wskazanego konta. */
+export function saveAllegroAccountTokens(accountId, tokens = {}) {
+  if (!accountId || accountId === 'primary') return saveAllegroTokens(tokens)
+  const current = store.get('integrations')
+  const al = { ...current.allegro }
+  const extra = [...(al.extraAccounts ?? [])]
+  const i = extra.findIndex((a) => a.id === accountId)
+  if (i < 0) return getPublicIntegrations()
+  const acc = { ...extra[i] }
+  if (tokens.accessToken) {
+    const { enc, plainFallback } = encryptSecret(tokens.accessToken)
+    acc.accessTokenEnc = enc
+    acc.accessTokenPlain = plainFallback
+  }
+  if (tokens.refreshToken) {
+    const { enc, plainFallback } = encryptSecret(tokens.refreshToken)
+    acc.refreshTokenEnc = enc
+    acc.refreshTokenPlain = plainFallback
+  }
+  if (tokens.expiresIn) acc.expiresAt = new Date(Date.now() + Number(tokens.expiresIn) * 1000).toISOString()
+  if (tokens.scope !== undefined) acc.scope = String(tokens.scope ?? '')
+  if (tokens.accountLogin !== undefined) acc.accountLogin = String(tokens.accountLogin ?? '')
+  acc.authorizedAt = new Date().toISOString()
+  extra[i] = acc
+  al.extraAccounts = extra
+  store.set('integrations', { ...current, allegro: al })
+  return getPublicIntegrations()
+}
+
+/** Zapis wyniku testu wskazanego konta. */
+export function setAllegroAccountCheck(accountId, ok, message) {
+  if (!accountId || accountId === 'primary') return setIntegrationCheck('allegro', ok, message)
+  const current = store.get('integrations')
+  const al = { ...current.allegro }
+  const extra = [...(al.extraAccounts ?? [])]
+  const i = extra.findIndex((a) => a.id === accountId)
+  if (i < 0) return getPublicIntegrations()
+  extra[i] = {
+    ...extra[i],
+    lastCheckAt: new Date().toISOString(),
+    lastCheckOk: Boolean(ok),
+    lastCheckMessage: String(message ?? '').slice(0, 500)
+  }
+  al.extraAccounts = extra
+  store.set('integrations', { ...current, allegro: al })
+  return getPublicIntegrations()
+}
+
 /**
  * Zapis wyniku testu połączenia.
  * @param {'baselinker'|'allegro'} channel
@@ -542,13 +687,24 @@ export function setStockHashes(hashes) {
   store.set('cache.stockHashes', hashes)
 }
 
-/** Pamięć hashy dla kanału Allegro (niezależna od BaseLinkera). */
-export function getAllegroStockHashes() {
-  return store.get('cache.stockHashesAllegro') || {}
+/**
+ * Pamięć hashy dla kanału Allegro (niezależna od BaseLinkera), per konto.
+ * Konto główne ('primary') używa dotychczasowego klucza (bez resyncu po update).
+ */
+export function getAllegroStockHashes(accountId = 'primary') {
+  if (!accountId || accountId === 'primary') return store.get('cache.stockHashesAllegro') || {}
+  const extra = store.get('cache.stockHashesAllegroExtra') || {}
+  return extra[accountId] || {}
 }
 
-export function setAllegroStockHashes(hashes) {
-  store.set('cache.stockHashesAllegro', hashes)
+export function setAllegroStockHashes(accountId = 'primary', hashes) {
+  if (!accountId || accountId === 'primary') {
+    store.set('cache.stockHashesAllegro', hashes)
+    return
+  }
+  const extra = { ...(store.get('cache.stockHashesAllegroExtra') || {}) }
+  extra[accountId] = hashes
+  store.set('cache.stockHashesAllegroExtra', extra)
 }
 
 const SYNC_MARK_KEYS = {
@@ -569,7 +725,10 @@ export function markSync(kind) {
  */
 export function resetStockCache(scope = 'all') {
   if (scope === 'all' || scope === 'baselinker') store.set('cache.stockHashes', {})
-  if (scope === 'all' || scope === 'allegro') store.set('cache.stockHashesAllegro', {})
+  if (scope === 'all' || scope === 'allegro') {
+    store.set('cache.stockHashesAllegro', {})
+    store.set('cache.stockHashesAllegroExtra', {})
+  }
 }
 
 /** Bezpieczny zrzut ustawień do GUI — bez sekretów. */

@@ -45,7 +45,7 @@ export async function buildReport(log = () => {}) {
   log('info', 'Raport katalogu: pobieram WAPRO…')
   const wapro = await snapshotWapro()
   log('info', 'Raport katalogu: pobieram oferty Allegro…')
-  const allegro = await allegroSync.listOffersWithStock(log)
+  const allegro = await allegroSync.listOffersWithStockAll(log)
   log('info', 'Raport katalogu: pobieram produkty BaseLinker…')
   let base = []
   try {

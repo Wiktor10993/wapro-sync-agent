@@ -26,6 +26,7 @@ import {
   getSchemaMap,
   getStockHashes,
   getSyncSettings,
+  listAllegroAccountsPublic,
   setAllegroStockHashes,
   setStockHashes
 } from '../store.js'
@@ -98,11 +99,11 @@ function baselinkerAdapter(log) {
   }
 }
 
-function allegroAdapter(log) {
+function allegroAdapter(accountId, log) {
   return {
     channel: 'allegro',
     async fetchOffers() {
-      return allegroSync.listOffers(log)
+      return allegroSync.listOffers(accountId, log)
     },
     /**
      * #2: WAPRO jest źródłem prawdy.
@@ -123,16 +124,17 @@ function allegroAdapter(log) {
       for (const i of positive) {
         try {
           if (await restockStore.isWatched('allegro', i.offerId)) {
-            const ok = await allegroSync.activateOffer(i.offerId, log)
+            const ok = await allegroSync.activateOffer(accountId, i.offerId, log)
             if (ok) await restockStore.clearRestock('allegro', i.offerId)
             else await restockStore.flagNeedsRelist({ channel: 'allegro', offerId: i.offerId, sku: i.sku ?? '', ean: i.ean ?? '', quantity: i.quantity })
           }
         } catch (err) {
-          log('warn', `Allegro: wznowienie oferty ${i.offerId} nie powiodło się: ${err?.message ?? err}`)
+          log('warn', `Allegro[${accountId}]: wznowienie oferty ${i.offerId} nie powiodło się: ${err?.message ?? err}`)
         }
       }
       // Ustawienie stanów (batchowane + throttling wewnątrz setOffersStock).
       const setUpdated = await allegroSync.setOffersStock(
+        accountId,
         positive.map((i) => ({ offerId: i.offerId, quantity: i.quantity })),
         log
       )
@@ -141,11 +143,11 @@ function allegroAdapter(log) {
       // 2) Stan ≤ 0 — zakończ ofertę i weź na obserwację do wznowienia.
       for (const i of zero) {
         try {
-          await allegroSync.endOffer(i.offerId, log)
+          await allegroSync.endOffer(accountId, i.offerId, log)
           await restockStore.watchRestock({ channel: 'allegro', offerId: i.offerId, sku: i.sku ?? '', ean: i.ean ?? '' })
         } catch (err) {
           // Oferty już nie ma → i tak traktujemy jako zamkniętą (nie kręcimy w kółko).
-          log('info', `Allegro: oferta ${i.offerId} już zakończona/nieobecna — pomijam (${err?.message ?? err}).`)
+          log('info', `Allegro[${accountId}]: oferta ${i.offerId} już zakończona/nieobecna — pomijam (${err?.message ?? err}).`)
         }
         updatedOfferIds.add(String(i.offerId)) // zatwierdź hash: nie kończ jej co cykl
       }
@@ -186,20 +188,44 @@ export async function runBaselinkerSync(log = () => {}) {
   )
 }
 
-/** Synchronizacja stanów Wapro → Allegro przez nowy silnik. */
+/**
+ * Synchronizacja stanów Wapro → Allegro przez nowy silnik — dla KAŻDEGO
+ * autoryzowanego konta (osobne tokeny, osobna mapa ofert, osobne hashe stanów).
+ * Zwraca zagregowane podsumowanie.
+ */
 export async function runAllegroSync(log = () => {}) {
   await ensureAuditSchema()
-  return runInventorySync(
-    allegroAdapter(log),
-    {
-      loadSnapshot,
-      loadHashes: async () => getAllegroStockHashes(),
-      saveHashes: async (h) => setAllegroStockHashes(h),
-      writeLog: (entries) => syncLog.insertMany(entries),
-      loopGuard
-    },
-    { matcher: {}, batch: batchFromSettings() }
-  )
+  const accounts = listAllegroAccountsPublic().filter((a) => a.authorized)
+  if (accounts.length === 0) {
+    log('warn', 'Allegro: brak autoryzowanego konta — pomijam.')
+    return { checked: 0, changed: 0, needsReview: 0, errors: 0, accounts: 0 }
+  }
+
+  const agg = { checked: 0, changed: 0, needsReview: 0, errors: 0, accounts: accounts.length }
+  for (const a of accounts) {
+    try {
+      log('info', `Allegro: synchronizacja stanów — konto „${a.label}".`)
+      const summary = await runInventorySync(
+        allegroAdapter(a.id, log),
+        {
+          loadSnapshot,
+          loadHashes: async () => getAllegroStockHashes(a.id),
+          saveHashes: async (h) => setAllegroStockHashes(a.id, h),
+          writeLog: (entries) => syncLog.insertMany(entries),
+          loopGuard
+        },
+        { matcher: {}, batch: batchFromSettings() }
+      )
+      agg.checked += summary.checked ?? 0
+      agg.changed += summary.changed ?? 0
+      agg.needsReview += summary.needsReview ?? 0
+      agg.errors += summary.errors ?? 0
+    } catch (err) {
+      agg.errors += 1
+      log('error', `Allegro[${a.id}]: synchronizacja nieudana: ${err.message}`)
+    }
+  }
+  return agg
 }
 
 /** Odczyt dziennika dla zakładki UI. */

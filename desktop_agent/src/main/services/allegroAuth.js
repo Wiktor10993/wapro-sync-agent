@@ -2,10 +2,11 @@ import http from 'node:http'
 import crypto from 'node:crypto'
 import { shell } from 'electron'
 import {
-  clearAllegroTokens,
   getIntegrations,
-  saveAllegroTokens,
-  setIntegrationCheck
+  getAllegroAccount,
+  saveAllegroAccountTokens,
+  setAllegroAccountCheck,
+  removeAllegroAccount
 } from '../store.js'
 
 /**
@@ -109,12 +110,15 @@ let activeFlow = null
  * @param {(level:string, message:string)=>void} [log]
  * @returns {Promise<{ok:boolean, scope?:string, expiresAt?:string, error?:string}>}
  */
-export async function authorizeAllegro(log = () => {}) {
+export async function authorizeAllegro(accountId = 'primary', log = () => {}) {
   if (activeFlow) {
     return { ok: false, error: 'Autoryzacja już trwa — dokończ ją w przeglądarce albo poczekaj na wygaśnięcie.' }
   }
 
-  const { allegro } = getIntegrations({ withSecrets: true })
+  const allegro = getAllegroAccount(accountId, { withSecrets: true })
+  if (!allegro) {
+    return { ok: false, error: 'Nie znaleziono konta Allegro o tym identyfikatorze.' }
+  }
 
   if (!allegro.clientId) {
     return { ok: false, error: 'Nie podano Client ID aplikacji Allegro.' }
@@ -160,7 +164,7 @@ export async function authorizeAllegro(log = () => {}) {
       verifier
     })
 
-    saveAllegroTokens({
+    saveAllegroAccountTokens(accountId, {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresIn: tokens.expires_in,
@@ -173,19 +177,19 @@ export async function authorizeAllegro(log = () => {}) {
     try {
       const me = await apiGet(allegro.sandbox, tokens.access_token, '/me')
       accountLogin = me?.login ?? me?.id ?? ''
-      if (accountLogin) saveAllegroTokens({ accountLogin })
+      if (accountLogin) saveAllegroAccountTokens(accountId, { accountLogin })
     } catch {
       /* brak /me nie unieważnia autoryzacji */
     }
 
     const expiresAt = new Date(Date.now() + Number(tokens.expires_in ?? 43200) * 1000).toISOString()
 
-    setIntegrationCheck('allegro', true, accountLogin ? `Połączono z kontem ${accountLogin}.` : 'Połączono.')
+    setAllegroAccountCheck(accountId, true, accountLogin ? `Połączono z kontem ${accountLogin}.` : 'Połączono.')
     log('success', `Allegro: autoryzacja zakończona${accountLogin ? ` (konto ${accountLogin})` : ''}.`)
 
     return { ok: true, scope: tokens.scope, expiresAt, accountLogin }
   } catch (err) {
-    setIntegrationCheck('allegro', false, err.message)
+    setAllegroAccountCheck(accountId, false, err.message)
     log('error', `Allegro: autoryzacja nieudana — ${err.message}`)
     return { ok: false, error: err.message }
   } finally {
@@ -320,8 +324,11 @@ async function exchangeCode({ auth, clientId, clientSecret, redirectUri, code, v
  * Zwraca ważny access token, odświeżając go w razie potrzeby.
  * Margines 2 minut — token nie może wygasnąć w trakcie żądania.
  */
-export async function getValidAccessToken(log = () => {}) {
-  const { allegro } = getIntegrations({ withSecrets: true })
+export async function getValidAccessToken(accountId = 'primary', log = () => {}) {
+  const allegro = getAllegroAccount(accountId, { withSecrets: true })
+  if (!allegro) {
+    throw new Error('Nie znaleziono konta Allegro o tym identyfikatorze.')
+  }
 
   if (!allegro.accessToken) {
     throw new Error('Konto Allegro nie jest połączone. Kliknij „Autoryzuj Allegro”.')
@@ -363,7 +370,7 @@ export async function getValidAccessToken(log = () => {}) {
     )
   }
 
-  saveAllegroTokens({
+  saveAllegroAccountTokens(accountId, {
     accessToken: data.access_token,
     refreshToken: data.refresh_token,
     expiresIn: data.expires_in,
@@ -463,26 +470,27 @@ async function apiGet(sandbox, accessToken, path) {
  * zakresu do odczytu konta. Rozróżnienie jest istotne: „brak uprawnień”
  * i „zły token” naprawia się zupełnie inaczej.
  */
-export async function testAllegroConnection(log = () => {}) {
+export async function testAllegroConnection(accountId = 'primary', log = () => {}) {
   try {
-    const token = await getValidAccessToken(log)
-    const { allegro } = getIntegrations()
+    const token = await getValidAccessToken(accountId, log)
+    const acc = getAllegroAccount(accountId, { withSecrets: false })
+    const sandbox = Boolean(acc?.sandbox)
 
     try {
-      const me = await apiGet(allegro.sandbox, token, '/me')
+      const me = await apiGet(sandbox, token, '/me')
       const who = me?.login || me?.id || 'konto bez nazwy'
       const message = `Połączono z kontem Allegro: ${who}.`
 
-      if (me?.login) saveAllegroTokens({ accountLogin: me.login })
-      setIntegrationCheck('allegro', true, message)
+      if (me?.login) saveAllegroAccountTokens(accountId, { accountLogin: me.login })
+      setAllegroAccountCheck(accountId, true, message)
       log('success', `Allegro: ${message}`)
       return { ok: true, message, account: who }
     } catch (err) {
       if (err.status === 403 || err.status === 404) {
         // /me niedostępne — sprawdzamy zakres, którego faktycznie używamy.
-        await apiGet(allegro.sandbox, token, '/sale/offers?limit=1')
+        await apiGet(sandbox, token, '/sale/offers?limit=1')
         const message = 'Token działa, dostęp do ofert potwierdzony (endpoint /me niedostępny dla tej aplikacji).'
-        setIntegrationCheck('allegro', true, message)
+        setAllegroAccountCheck(accountId, true, message)
         log('success', `Allegro: ${message}`)
         return { ok: true, message }
       }
@@ -490,7 +498,7 @@ export async function testAllegroConnection(log = () => {}) {
     }
   } catch (err) {
     const message = interpretAllegroError(err)
-    setIntegrationCheck('allegro', false, message)
+    setAllegroAccountCheck(accountId, false, message)
     log('error', `Allegro: ${message}`)
     return { ok: false, message }
   }
@@ -515,25 +523,26 @@ export function interpretAllegroError(err) {
   return msg
 }
 
-/** Odłączenie konta. */
-export function disconnectAllegro(log = () => {}) {
-  clearAllegroTokens()
-  log('info', 'Allegro: konto odłączone.')
+/** Odłączenie/usunięcie konta. 'primary' → czyści tokeny; dodatkowe → usuwa wpis. */
+export function disconnectAllegro(accountId = 'primary', log = () => {}) {
+  removeAllegroAccount(accountId)
+  log('info', `Allegro: konto odłączone (${accountId}).`)
   return { ok: true }
 }
 
-/** Pobranie zamówień — szkielet dla synchronizacji bez Cloud Huba. */
-export async function fetchAllegroOrders({ limit = 20, status = 'READY_FOR_PROCESSING' } = {}, log = () => {}) {
-  const token = await getValidAccessToken(log)
-  const { allegro } = getIntegrations()
+/** Pobranie zamówień wskazanego konta — do korekty stanu WAPRO. */
+export async function fetchAllegroOrders(accountId = 'primary', { limit = 20, status = 'READY_FOR_PROCESSING' } = {}, log = () => {}) {
+  const token = await getValidAccessToken(accountId, log)
+  const acc = getAllegroAccount(accountId, { withSecrets: false })
+  const sandbox = Boolean(acc?.sandbox)
 
   const query = new URLSearchParams({ limit: String(Math.min(100, limit)) })
   if (status) query.set('fulfillment.status', status)
 
-  const data = await apiGet(allegro.sandbox, token, `/order/checkout-forms?${query.toString()}`)
+  const data = await apiGet(sandbox, token, `/order/checkout-forms?${query.toString()}`)
   const orders = data?.checkoutForms ?? []
 
-  log('info', `Allegro: pobrano ${orders.length} zamówień (status ${status || 'dowolny'}).`)
+  log('info', `Allegro: pobrano ${orders.length} zamówień (konto ${acc?.label ?? accountId}, status ${status || 'dowolny'}).`)
   return orders
 }
 

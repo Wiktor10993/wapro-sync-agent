@@ -53,11 +53,11 @@ const baselinkerPort = {
 const allegroPort = {
   channel: 'allegro',
   async pushQuantity(offerId, _variantId, quantity) {
-    // setSingleOfferStock rzuca surowym błędem Allegro (status/kod → sync_errors).
-    await allegroSync.setSingleOfferStock(offerId, quantity, logger)
+    // Action Center działa na koncie głównym ('primary').
+    await allegroSync.setSingleOfferStock('primary', offerId, quantity, logger)
   },
   async listOffers() {
-    return allegroSync.listOffers(logger)
+    return allegroSync.listOffers('primary', logger)
   }
 }
 
