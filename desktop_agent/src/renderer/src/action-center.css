@@ -110,16 +110,35 @@
 .eco-candidate:hover { background: rgba(59, 130, 246, 0.14); }
 
 /* --- Dodatkowe konta Allegro --- */
-.account-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0;
-  border-bottom: 1px solid rgba(127, 127, 127, 0.15);
-  flex-wrap: wrap;
+.account-list { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 14px; }
+.account-card {
+  border: 1px solid rgba(127, 127, 127, 0.22);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: rgba(127, 127, 127, 0.05);
 }
-.account-row__info { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.account-card__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.account-card__name { font-weight: 600; font-size: 14px; }
+.account-card__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.account-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid rgba(127, 127, 127, 0.15);
+}
+.account-add__input {
+  flex: 1 1 240px;
+  min-width: 180px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  background: var(--bg-elev, #fff);
+  color: inherit;
+  font-size: 14px;
+}
+.btn--danger { color: #dc2626; }
 
 
 /* Podzakładki */

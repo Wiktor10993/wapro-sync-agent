@@ -40,8 +40,67 @@ export default function MapowanieTab({ busy, run }) {
     [run, loadPhantoms]
   )
 
+  // --- masowe mapowanie (override wysyłki stanów) --------------------------
+  const [bulkCounts, setBulkCounts] = useState({ allegro: 0, baselinker: 0 })
+  const [bulkResult, setBulkResult] = useState(null)
+
+  const loadBulkCounts = useCallback(async () => {
+    const r = await window.agent.mappingBulkCounts()
+    if (r.ok) setBulkCounts(r.data || { allegro: 0, baselinker: 0 })
+  }, [])
+  useEffect(() => { loadBulkCounts() }, [loadBulkCounts])
+
+  const bulkTemplate = useCallback(async () => {
+    const picked = await window.agent.pickExportFolder()
+    if (!picked.ok || !picked.data) return
+    await run('bulk-tpl', () => window.agent.mappingBulkTemplate(picked.data), 'Wzorzec zapisany.')
+  }, [run])
+
+  const bulkImport = useCallback(async () => {
+    const picked = await window.agent.pickCsvFile()
+    if (!picked.ok || !picked.data) return
+    const d = await run('bulk-imp', () => window.agent.mappingBulkImport(picked.data), 'Masowe mapowanie wczytane.')
+    if (d) { setBulkResult(d); loadBulkCounts() }
+  }, [run, loadBulkCounts])
+
+  const bulkClear = useCallback(
+    async (channel) => {
+      if (!window.confirm(`Wyczyścić zapisane mapowania (${channel})?`)) return
+      await run('bulk-clr', () => window.agent.mappingBulkClear(channel))
+      loadBulkCounts()
+    },
+    [run, loadBulkCounts]
+  )
+
   return (
     <div className="tab-narzedzia">
+      {/* ---- Masowe mapowanie (nadrzędne wobec auto-dopasowania) ---- */}
+      <section className="card">
+        <h2>Masowe mapowanie (CSV) — wpływa na wysyłkę stanów</h2>
+        <p className="muted">
+          Wgraj JEDEN plik CSV: klucz produktu (<code>indeks</code> lub <code>ean</code>) + <code>allegro_nr_aukcji</code> i/lub <code>baselinker_product_id</code>.
+          Te mapowania są <strong>nadrzędne</strong> wobec auto-dopasowania — produkt trafi dokładnie na wskazaną ofertę.
+          Przy wielu kontach Allegro numer aukcji sam wskazuje właściwe konto.
+        </p>
+        <p className="result-summary">
+          Zapisane mapowania — Allegro: <strong>{bulkCounts.allegro}</strong>, BaseLinker: <strong>{bulkCounts.baselinker}</strong>
+        </p>
+        <div className="button-row">
+          <button type="button" className="btn" onClick={bulkTemplate} disabled={busy === 'bulk-tpl'}>Pobierz wzorzec</button>
+          <button type="button" className="btn btn--primary" onClick={bulkImport} disabled={busy === 'bulk-imp'}>
+            {busy === 'bulk-imp' ? <><span className="spinner" /> Wczytuję…</> : 'Wgraj plik CSV'}
+          </button>
+          <button type="button" className="btn btn--small" onClick={() => bulkClear('allegro')} disabled={busy === 'bulk-clr'}>Wyczyść Allegro</button>
+          <button type="button" className="btn btn--small" onClick={() => bulkClear('baselinker')} disabled={busy === 'bulk-clr'}>Wyczyść Base</button>
+        </div>
+        {bulkResult && (
+          <p className="result-summary">
+            Wczytano — Allegro: <strong>{bulkResult.allegro}</strong>, BaseLinker: <strong>{bulkResult.baselinker}</strong>,
+            pominięto {bulkResult.skipped} (z {bulkResult.rows} wierszy).
+          </p>
+        )}
+      </section>
+
       <section className="card">
         <h2>Mapowanie produktów po CSV</h2>
         <p className="muted">

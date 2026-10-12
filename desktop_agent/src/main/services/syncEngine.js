@@ -19,6 +19,7 @@ import * as blApi from './baselinkerApi.js'
 import * as allegroSync from './allegroSync.js'
 import * as restockStore from './restockStore.js'
 import * as analytics from './analytics.js'
+import { getBufferDb } from './bufferDb.js'
 import {
   getAllegroStockHashes,
   getDbSettings,
@@ -172,9 +173,21 @@ function batchFromSettings() {
   }
 }
 
+/** Ręczne mapowania (masowy CSV) dla kanału — override produkcyjnej wysyłki. */
+async function loadManualOffers(channel, log) {
+  try {
+    const db = await getBufferDb()
+    return db.listManualMappings(channel)
+  } catch (err) {
+    log('warn', `Mapowania ręczne niedostępne (${channel}): ${err.message}`)
+    return []
+  }
+}
+
 /** Synchronizacja stanów Wapro → BaseLinker przez nowy silnik. */
 export async function runBaselinkerSync(log = () => {}) {
   await ensureAuditSchema()
+  const manualOffers = await loadManualOffers('baselinker', log)
   return runInventorySync(
     baselinkerAdapter(log),
     {
@@ -184,7 +197,7 @@ export async function runBaselinkerSync(log = () => {}) {
       writeLog: (entries) => syncLog.insertMany(entries),
       loopGuard
     },
-    { matcher: {}, batch: batchFromSettings() }
+    { matcher: {}, batch: batchFromSettings(), manualOffers }
   )
 }
 
@@ -201,6 +214,7 @@ export async function runAllegroSync(log = () => {}) {
     return { checked: 0, changed: 0, needsReview: 0, errors: 0, accounts: 0 }
   }
 
+  const manualOffers = await loadManualOffers('allegro', log)
   const agg = { checked: 0, changed: 0, needsReview: 0, errors: 0, accounts: accounts.length }
   for (const a of accounts) {
     try {
@@ -214,7 +228,7 @@ export async function runAllegroSync(log = () => {}) {
           writeLog: (entries) => syncLog.insertMany(entries),
           loopGuard
         },
-        { matcher: {}, batch: batchFromSettings() }
+        { matcher: {}, batch: batchFromSettings(), manualOffers }
       )
       agg.checked += summary.checked ?? 0
       agg.changed += summary.changed ?? 0

@@ -227,6 +227,21 @@ CREATE TABLE IF NOT EXISTS processed_sales (
   at_ms    INTEGER NOT NULL,
   PRIMARY KEY (source, order_ref)
 );
+
+-- Masowe mapowanie ręczne (override) UŻYWANE przez produkcyjną wysyłkę stanów.
+-- Klucz = (kanał, oferta): oferta Allegro należy do jednego konta, więc ten sam
+-- plik obsługuje wiele kont (konto rozpoznajemy po tym, czy oferta jest w jego
+-- liście). Ten sam SKU może mieć kilka ofert (różne konta) — stąd PK po ofercie.
+CREATE TABLE IF NOT EXISTS manual_mappings (
+  channel    TEXT NOT NULL,            -- 'allegro' | 'baselinker'
+  offer_id   TEXT NOT NULL,            -- numer aukcji Allegro / product_id BaseLinker
+  sku        TEXT NOT NULL DEFAULT '',
+  ean        TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (channel, offer_id)
+);
+CREATE INDEX IF NOT EXISTS ix_manualmap_sku ON manual_mappings(channel, sku);
+CREATE INDEX IF NOT EXISTS ix_manualmap_ean ON manual_mappings(channel, ean);
 `
 
 export class LocalDatabase {
@@ -496,6 +511,39 @@ export class LocalDatabase {
   pruneHistory(beforeMs: number): void {
     this.db.prepare('DELETE FROM stock_history WHERE at_ms < ?').run(beforeMs)
     this.db.prepare('DELETE FROM sales_events WHERE at_ms < ?').run(beforeMs)
+  }
+
+  // --- masowe mapowanie ręczne (override wysyłki stanów) -----------------
+  upsertManualMapping(m: { channel: Channel; offerId: string; sku?: string; ean?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO manual_mappings (channel, offer_id, sku, ean, updated_at)
+         VALUES (@channel, @offerId, @sku, @ean, datetime('now'))
+         ON CONFLICT(channel, offer_id) DO UPDATE SET
+           sku = excluded.sku, ean = excluded.ean, updated_at = datetime('now')`
+      )
+      .run({ channel: m.channel, offerId: String(m.offerId), sku: m.sku ?? '', ean: m.ean ?? '' })
+  }
+
+  /** Wszystkie ręczne mapowania kanału — do override'u w orchestratorze. */
+  listManualMappings(channel: Channel): Array<{ offerId: string; sku: string; ean: string }> {
+    return (this.db.prepare('SELECT offer_id, sku, ean FROM manual_mappings WHERE channel = ?').all(channel) as any[]).map((r) => ({
+      offerId: r.offer_id,
+      sku: r.sku ?? '',
+      ean: r.ean ?? ''
+    }))
+  }
+
+  countManualMappings(channel?: Channel): number {
+    const r = channel
+      ? (this.db.prepare('SELECT COUNT(*) AS n FROM manual_mappings WHERE channel = ?').get(channel) as any)
+      : (this.db.prepare('SELECT COUNT(*) AS n FROM manual_mappings').get() as any)
+    return Number(r?.n) || 0
+  }
+
+  clearManualMappings(channel?: Channel): void {
+    if (channel) this.db.prepare('DELETE FROM manual_mappings WHERE channel = ?').run(channel)
+    else this.db.prepare('DELETE FROM manual_mappings').run()
   }
 
   // --- dedup przetworzonych zamówień (v6.1: sprzedaż → delta stanu) -------

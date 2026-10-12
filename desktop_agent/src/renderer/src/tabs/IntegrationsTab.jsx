@@ -483,6 +483,7 @@ function ConnectionBadge({ status, label }) {
  */
 function AllegroAccountsCard({ busy, run }) {
   const [accounts, setAccounts] = useState([])
+  const [newLabel, setNewLabel] = useState('')
 
   const reload = useCallback(async () => {
     const r = await window.agent.listAllegroAccounts()
@@ -495,11 +496,17 @@ function AllegroAccountsCard({ busy, run }) {
 
   const extras = accounts.filter((a) => a.id !== 'primary')
 
-  const add = async () => {
-    const label = (window.prompt('Nazwa nowego konta Allegro (np. „Konto firmowe 2"):') || '').trim()
-    const r = await run('al-add', () => window.agent.addAllegroAccount(label))
-    if (r?.accounts) setAccounts(r.accounts)
-    else reload()
+  // KROK 1: tylko utwórz konto (nowy wiersz pojawia się od razu). Autoryzacja to
+  // osobny krok — dokładnie jak przy koncie głównym. Nie używamy window.prompt
+  // (Electron go nie wspiera) ani nie blokujemy listy OAuthem.
+  const addAccount = async () => {
+    const r = await run('al-add', () => window.agent.addAllegroAccount(newLabel.trim()), 'Dodano konto — kliknij „Autoryzuj".')
+    if (r?.accounts) {
+      setAccounts(r.accounts)
+      setNewLabel('')
+    } else {
+      reload()
+    }
   }
   const authorize = async (id) => {
     const r = await run(`al-auth-${id}`, () => window.agent.authorizeAllegro(id))
@@ -523,39 +530,51 @@ function AllegroAccountsCard({ busy, run }) {
         <h2>Dodatkowe konta Allegro</h2>
       </div>
       <p className="hint">
-        Ta sama aplikacja Allegro (Client ID/Secret z sekcji wyżej), ale osobne konta sprzedawcy — każde z własną
-        autoryzacją. Stany z WAPRO lecą na wszystkie konta; zamówienia z każdego konta zdejmują stan w WAPRO.
+        Ta sama aplikacja (Client ID/Secret z sekcji wyżej), osobne konta sprzedawcy. Stany z WAPRO lecą na wszystkie
+        konta; zamówienia z każdego konta zdejmują stan w WAPRO.
       </p>
 
-      {extras.length === 0 && (
-        <p className="empty-state">Brak dodatkowych kont. Konto główne skonfigurujesz w sekcji „Allegro" powyżej.</p>
-      )}
+      <div className="account-list">
+        {extras.length === 0 && (
+          <p className="empty-state">Brak dodatkowych kont — dodaj pierwsze poniżej.</p>
+        )}
 
-      {extras.map((a) => (
-        <div key={a.id} className="account-row">
-          <div className="account-row__info">
-            <strong>{a.label}</strong>{' '}
-            {a.authorized ? (
-              <Tag tone="ok">połączone{a.accountLogin ? ` — ${a.accountLogin}` : ''}</Tag>
-            ) : (
-              <Tag tone="warn">niepołączone</Tag>
-            )}
-            {a.tokenExpired && <Tag tone="warn">token wygasł</Tag>}
+        {extras.map((a) => (
+          <div key={a.id} className="account-card">
+            <div className="account-card__head">
+              <span className="account-card__name">{a.label}</span>
+              {a.authorized ? (
+                <Tag tone="ok">połączone{a.accountLogin ? ` — ${a.accountLogin}` : ''}</Tag>
+              ) : (
+                <Tag tone="warn">niepołączone</Tag>
+              )}
+              {a.tokenExpired && <Tag tone="warn">token wygasł</Tag>}
+            </div>
+            <div className="account-card__actions">
+              <button type="button" className="btn btn--tiny" disabled={busy === `al-auth-${a.id}`} onClick={() => authorize(a.id)}>
+                {busy === `al-auth-${a.id}` ? 'Czekam na przeglądarkę…' : a.authorized ? 'Autoryzuj ponownie' : 'Autoryzuj'}
+              </button>
+              <button type="button" className="btn btn--tiny" disabled={busy === `al-test-${a.id}` || !a.authorized} onClick={() => test(a.id)}>
+                {busy === `al-test-${a.id}` ? 'Sprawdzam…' : 'Testuj'}
+              </button>
+              <button type="button" className="btn btn--tiny btn--danger" onClick={() => remove(a.id)}>Usuń</button>
+            </div>
           </div>
-          <div className="button-row">
-            <button type="button" className="btn btn--tiny" disabled={busy === `al-auth-${a.id}`} onClick={() => authorize(a.id)}>
-              {busy === `al-auth-${a.id}` ? 'Czekam…' : a.authorized ? 'Autoryzuj ponownie' : 'Autoryzuj'}
-            </button>
-            <button type="button" className="btn btn--tiny" disabled={busy === `al-test-${a.id}` || !a.authorized} onClick={() => test(a.id)}>
-              Testuj
-            </button>
-            <button type="button" className="btn btn--tiny" onClick={() => remove(a.id)}>Usuń</button>
-          </div>
-        </div>
-      ))}
+        ))}
+      </div>
 
-      <div className="button-row" style={{ marginTop: 10 }}>
-        <button type="button" className="btn" disabled={busy === 'al-add'} onClick={add}>+ Dodaj konto Allegro</button>
+      <div className="account-add">
+        <input
+          type="text"
+          className="account-add__input"
+          placeholder="Nazwa konta (opcjonalnie, np. Sklep 2)"
+          value={newLabel}
+          onChange={(e) => setNewLabel(e.target.value)}
+          disabled={busy === 'al-add'}
+        />
+        <button type="button" className="btn btn--primary" disabled={busy === 'al-add'} onClick={addAccount}>
+          {busy === 'al-add' ? 'Dodaję…' : '+ Dodaj konto'}
+        </button>
       </div>
     </section>
   )

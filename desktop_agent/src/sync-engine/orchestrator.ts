@@ -44,6 +44,12 @@ export interface OrchestratorOptions {
   batch?: Partial<BatchOptions>
   /** Ile logów zebrać w pamięci przed zrzutem do bazy (bulk). */
   logFlushEvery?: number
+  /**
+   * Ręczne mapowania (masowy import CSV): wymuszają konkretną ofertę dla SKU/EAN,
+   * zanim zadziała fuzzy. Stosujemy TYLKO gdy oferta jest w bieżącym fetchu
+   * (czyli należy do tego konta) — dzięki temu ten sam plik obsługuje wiele kont.
+   */
+  manualOffers?: Array<{ offerId: string; sku?: string; ean?: string }>
 }
 
 export async function runInventorySync(
@@ -98,8 +104,25 @@ export async function runInventorySync(
     const offers = await adapter.fetchOffers()
     const index = buildOfferIndex(offers)
 
+    // Override: ręczne mapowania ograniczone do ofert obecnych w TYM fetchu
+    // (czyli należących do tego konta). Wymuszają ofertę przed fuzzy-matchem.
+    const offerIdSet = new Set(offers.map((o) => String(o.offerId)))
+    const manualBySku = new Map<string, string>()
+    const manualByEan = new Map<string, string>()
+    for (const mm of options.manualOffers ?? []) {
+      if (!offerIdSet.has(String(mm.offerId))) continue
+      if (mm.sku) manualBySku.set(String(mm.sku), String(mm.offerId))
+      if (mm.ean) manualByEan.set(String(mm.ean), String(mm.offerId))
+    }
+
     const toPush: Array<{ offerId: string; variantId?: string; quantity: number; row: StockRow }> = []
     for (const row of afterEcho) {
+      const forced =
+        (row.sku && manualBySku.get(String(row.sku))) || (row.ean && manualByEan.get(String(row.ean))) || null
+      if (forced) {
+        toPush.push({ offerId: forced, quantity: row.quantity, row })
+        continue
+      }
       const m = matchProduct({ sku: row.sku, ean: row.ean, name: row.name }, index, options.matcher)
       if (m.status === 'MATCHED' && m.offerId) {
         toPush.push({ offerId: m.offerId, variantId: m.variantId, quantity: row.quantity, row })

@@ -59,6 +59,7 @@ import * as actionCenter from './services/actionCenter.js'
 import * as exportService from './services/exportService.js'
 import * as deadStockReport from './services/deadStockReport.js'
 import * as mappingCsv from './services/mappingCsv.js'
+import * as bulkMapping from './services/bulkMapping.js'
 import * as analytics from './services/analytics.js'
 import * as restockStore from './services/restockStore.js'
 import * as updater from './services/updater.js'
@@ -515,6 +516,12 @@ function registerIpc() {
   handle(CH.MAPPING_IMPORT, async ({ filePath, channels } = {}) => mappingCsv.importMapping(filePath, { channels }, log))
   handle(CH.MAPPING_LIST_PHANTOM, async () => mappingCsv.listPhantom())
   handle(CH.MAPPING_RESOLVE_PHANTOM, async ({ id, action } = {}) => mappingCsv.resolvePhantom(id, action))
+
+  // Masowe mapowanie (override wysyłki stanów)
+  handle(CH.MAPPING_BULK_IMPORT, async ({ filePath } = {}) => bulkMapping.importBulkMapping(filePath, log))
+  handle(CH.MAPPING_BULK_TEMPLATE, async ({ folder } = {}) => bulkMapping.exportBulkTemplate(folder, log))
+  handle(CH.MAPPING_BULK_COUNTS, async () => bulkMapping.bulkMappingCounts())
+  handle(CH.MAPPING_BULK_CLEAR, async ({ channel } = {}) => bulkMapping.clearBulkMapping(channel))
 
   // --- analityka (v6) ----------------------------------------------------
   handle(CH.ANALYTICS_COMPUTE, async (opts = {}) => analytics.computeAnalytics(opts, log))

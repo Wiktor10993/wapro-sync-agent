@@ -74,6 +74,10 @@ export const CH = {
   MAPPING_IMPORT: 'mapping:import',
   MAPPING_LIST_PHANTOM: 'mapping:list-phantom',
   MAPPING_RESOLVE_PHANTOM: 'mapping:resolve-phantom',
+  MAPPING_BULK_IMPORT: 'mapping:bulk-import',
+  MAPPING_BULK_TEMPLATE: 'mapping:bulk-template',
+  MAPPING_BULK_COUNTS: 'mapping:bulk-counts',
+  MAPPING_BULK_CLEAR: 'mapping:bulk-clear',
 
   // --- analityka (v6) -----------------------------------------------------
   ANALYTICS_COMPUTE: 'analytics:compute',

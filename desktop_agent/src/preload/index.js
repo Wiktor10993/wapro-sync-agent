@@ -102,6 +102,10 @@ const api = {
   mappingImport: (filePath, channels) => invoke(CH.MAPPING_IMPORT, { filePath, channels }),
   mappingListPhantom: () => invoke(CH.MAPPING_LIST_PHANTOM),
   mappingResolvePhantom: (id, action) => invoke(CH.MAPPING_RESOLVE_PHANTOM, { id, action }),
+  mappingBulkImport: (filePath) => invoke(CH.MAPPING_BULK_IMPORT, { filePath }),
+  mappingBulkTemplate: (folder) => invoke(CH.MAPPING_BULK_TEMPLATE, { folder }),
+  mappingBulkCounts: () => invoke(CH.MAPPING_BULK_COUNTS),
+  mappingBulkClear: (channel) => invoke(CH.MAPPING_BULK_CLEAR, { channel }),
 
   // --- analityka (v6) -----------------------------------------------------
   analyticsCompute: (opts) => invoke(CH.ANALYTICS_COMPUTE, opts),
