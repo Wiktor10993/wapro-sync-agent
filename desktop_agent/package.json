@@ -19,7 +19,9 @@
     "build:win": "electron-vite build && electron-builder --win",
     "build:dir": "electron-vite build && electron-builder --dir",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "npm run test:node && npm run test:engine",
+    "test:node": "node --test test/",
+    "test:engine": "vitest run --dir src",
     "db:up": "docker compose -f testing/docker-compose.yml up -d",
     "db:down": "docker compose -f testing/docker-compose.yml down",
     "db:seed": "node testing/seed.mjs"
