@@ -67,7 +67,8 @@
       {
         "provider": "github",
         "owner": "Wiktor10993",
-        "repo": "wapro-sync-agent"
+        "repo": "wapro-sync-agent",
+        "releaseType": "release"
       }
     ],
     "win": {

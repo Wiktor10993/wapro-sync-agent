@@ -103,6 +103,8 @@ function baselinkerAdapter(log) {
 function allegroAdapter(accountId, log) {
   return {
     channel: 'allegro',
+    // Osobny klucz Loop Guarda per konto — echo z konta A nie tłumi wysyłki na konto B.
+    guardKey: `allegro:${accountId}`,
     async fetchOffers() {
       return allegroSync.listOffers(accountId, log)
     },

@@ -19,6 +19,12 @@ import { processInBatches, type BatchOptions } from './sync/batchRunner'
 /** Adapter kanału (BaseLinker/Allegro) — orchestrator nie zna szczegółów API. */
 export interface ChannelAdapter {
   channel: SyncChannel
+  /**
+   * Klucz Loop Guarda (blokada przebiegu + tłumienie echa). Domyślnie = `channel`.
+   * Przy wielu kontach tego samego kanału (np. Allegro) podaj `allegro:<accountId>`,
+   * żeby wysyłka na konto A nie tłumiła tej samej wartości na koncie B.
+   */
+  guardKey?: string
   /** Pobiera oferty/produkty kanału do zbudowania indeksu dopasowań. */
   fetchOffers(): Promise<OfferCandidate[]>
   /**
@@ -58,6 +64,7 @@ export async function runInventorySync(
   options: OrchestratorOptions = {}
 ): Promise<SyncSummary> {
   const channel = adapter.channel
+  const guardKey = adapter.guardKey ?? channel
   const startedAt = new Date().toISOString()
   const logs: SyncLogEntry[] = []
   const reviewItems: ReviewItem[] = []
@@ -77,7 +84,7 @@ export async function runInventorySync(
   }
 
   // Blokada nakładania cykli (ochrona przed pętlą / równoległymi przebiegami).
-  if (!deps.loopGuard.tryAcquire(channel)) {
+  if (!deps.loopGuard.tryAcquire(guardKey)) {
     return summary(channel, startedAt, 0, 0, 0, 0, 0, [])
   }
 
@@ -94,7 +101,7 @@ export async function runInventorySync(
     }
 
     // 2) Loop Guard — odrzuć echa (ta sama wartość wysłana niedawno).
-    const { toSend: afterEcho, suppressed } = deps.loopGuard.filterEchoes(channel, delta)
+    const { toSend: afterEcho, suppressed } = deps.loopGuard.filterEchoes(guardKey, delta)
     for (const r of suppressed) {
       skipped++
       log({ sku: r.sku, ean: r.ean, offerId: null, qtyBefore: null, qtyAfter: r.quantity, status: 'SKIPPED', message: 'Echo tłumione (loop guard).' })
@@ -152,7 +159,7 @@ export async function runInventorySync(
             if (ok) {
               changed++
               updatedSkus.add(b.row.sku)
-              deps.loopGuard.recordPush(channel, b.row.sku, b.quantity)
+              deps.loopGuard.recordPush(guardKey, b.row.sku, b.quantity)
               log({ sku: b.row.sku, ean: b.row.ean, offerId: b.offerId, qtyBefore: null, qtyAfter: b.quantity, status: 'SUCCESS', message: `Zaktualizowano ofertę ${b.offerId}.` })
             } else {
               errors++
@@ -180,7 +187,7 @@ export async function runInventorySync(
 
     return summary(channel, startedAt, checked, changed, needsReview, errors, skipped, reviewItems)
   } finally {
-    deps.loopGuard.release(channel)
+    deps.loopGuard.release(guardKey)
     // Gdyby przebieg padł wyjątkiem przed zrzutem — dopisujemy logi best-effort.
     try {
       await flushLogs()
