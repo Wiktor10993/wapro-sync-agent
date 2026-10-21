@@ -122,8 +122,8 @@ describe('Kolejka błędów — push kończy się błędem', () => {
 
 describe('Niezmapowany produkt → Action Center', () => {
   it('brak mapowania i brak ofert → wpis w unmapped_queue', async () => {
-    db.upsertProduct({ sku: 'NOWY-1', ean: '', name: 'Wobler Nieznany 9cm', quantity: 5 })
-    // brak mapowań; listOffers zwraca puste → matcher NO_MATCH
+    // Nowy towar w WAPRO (brak w buforze) → próba mapowania; brak mapowań,
+    // listOffers zwraca puste → matcher NO_MATCH
     wapro.readSnapshot = vi.fn(async () => [{ sku: 'NOWY-1', ean: '', name: 'Wobler Nieznany 9cm', waproId: 2, quantity: 5 }])
     await orch.scanWapro()
 

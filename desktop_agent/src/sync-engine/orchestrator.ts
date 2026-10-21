@@ -10,7 +10,7 @@
  *   6. Summary      — zwraca SyncSummary do modala w UI.
  */
 
-import type { OfferCandidate, StockRow, SyncSummary, SyncChannel, SyncLogEntry, ReviewItem } from './types'
+import type { OfferCandidate, StockRow, SyncSummary, SyncChannel, SyncLogEntry, ReviewItem, SyncMatchStats } from './types'
 import { computeDelta, commitHashes } from './sync/deltaSync'
 import { LoopGuard } from './sync/loopGuard'
 import { buildOfferIndex, matchProduct, type MatcherOptions } from './matching/productMatcher'
@@ -19,6 +19,12 @@ import { processInBatches, type BatchOptions } from './sync/batchRunner'
 /** Adapter kanału (BaseLinker/Allegro) — orchestrator nie zna szczegółów API. */
 export interface ChannelAdapter {
   channel: SyncChannel
+  /**
+   * Klucz Loop Guarda (blokada przebiegu + tłumienie echa). Domyślnie = `channel`.
+   * Przy wielu kontach tego samego kanału (np. Allegro) podaj `allegro:<accountId>`,
+   * żeby wysyłka na konto A nie tłumiła tej samej wartości na koncie B.
+   */
+  guardKey?: string
   /** Pobiera oferty/produkty kanału do zbudowania indeksu dopasowań. */
   fetchOffers(): Promise<OfferCandidate[]>
   /**
@@ -50,6 +56,11 @@ export interface OrchestratorOptions {
    * (czyli należy do tego konta) — dzięki temu ten sam plik obsługuje wiele kont.
    */
   manualOffers?: Array<{ offerId: string; sku?: string; ean?: string }>
+  /**
+   * Wywoływane z dopasowaniami (oferta → SKU) z przebiegu, zanim ruszy wysyłka —
+   * np. żeby zapamiętać je do rozpoznawania SKU w zamówieniach.
+   */
+  onMatched?: (pairs: Array<{ offerId: string; sku: string; via: string }>) => void | Promise<void>
 }
 
 export async function runInventorySync(
@@ -58,6 +69,7 @@ export async function runInventorySync(
   options: OrchestratorOptions = {}
 ): Promise<SyncSummary> {
   const channel = adapter.channel
+  const guardKey = adapter.guardKey ?? channel
   const startedAt = new Date().toISOString()
   const logs: SyncLogEntry[] = []
   const reviewItems: ReviewItem[] = []
@@ -77,7 +89,7 @@ export async function runInventorySync(
   }
 
   // Blokada nakładania cykli (ochrona przed pętlą / równoległymi przebiegami).
-  if (!deps.loopGuard.tryAcquire(channel)) {
+  if (!deps.loopGuard.tryAcquire(guardKey)) {
     return summary(channel, startedAt, 0, 0, 0, 0, 0, [])
   }
 
@@ -94,7 +106,7 @@ export async function runInventorySync(
     }
 
     // 2) Loop Guard — odrzuć echa (ta sama wartość wysłana niedawno).
-    const { toSend: afterEcho, suppressed } = deps.loopGuard.filterEchoes(channel, delta)
+    const { toSend: afterEcho, suppressed } = deps.loopGuard.filterEchoes(guardKey, delta)
     for (const r of suppressed) {
       skipped++
       log({ sku: r.sku, ean: r.ean, offerId: null, qtyBefore: null, qtyAfter: r.quantity, status: 'SKIPPED', message: 'Echo tłumione (loop guard).' })
@@ -109,30 +121,54 @@ export async function runInventorySync(
     const offerIdSet = new Set(offers.map((o) => String(o.offerId)))
     const manualBySku = new Map<string, string>()
     const manualByEan = new Map<string, string>()
+    const stats: SyncMatchStats = {
+      offers: offers.length,
+      manualInAccount: 0,
+      manualTotal: options.manualOffers?.length ?? 0,
+      viaManual: 0,
+      viaEan: 0,
+      viaSku: 0,
+      viaName: 0,
+      noMatch: 0
+    }
     for (const mm of options.manualOffers ?? []) {
       if (!offerIdSet.has(String(mm.offerId))) continue
+      stats.manualInAccount++
       if (mm.sku) manualBySku.set(String(mm.sku), String(mm.offerId))
       if (mm.ean) manualByEan.set(String(mm.ean), String(mm.offerId))
     }
 
-    const toPush: Array<{ offerId: string; variantId?: string; quantity: number; row: StockRow }> = []
+    const toPush: Array<{ offerId: string; variantId?: string; quantity: number; row: StockRow; via: string }> = []
     for (const row of afterEcho) {
       const forced =
         (row.sku && manualBySku.get(String(row.sku))) || (row.ean && manualByEan.get(String(row.ean))) || null
       if (forced) {
-        toPush.push({ offerId: forced, quantity: row.quantity, row })
+        stats.viaManual++
+        toPush.push({ offerId: forced, quantity: row.quantity, row, via: 'manual' })
         continue
       }
       const m = matchProduct({ sku: row.sku, ean: row.ean, name: row.name }, index, options.matcher)
       if (m.status === 'MATCHED' && m.offerId) {
-        toPush.push({ offerId: m.offerId, variantId: m.variantId, quantity: row.quantity, row })
+        if (m.via === 'ean') stats.viaEan++
+        else if (m.via === 'sku') stats.viaSku++
+        else stats.viaName++
+        toPush.push({ offerId: m.offerId, variantId: m.variantId, quantity: row.quantity, row, via: m.via ?? '' })
       } else if (m.status === 'NEEDS_REVIEW') {
         needsReview++
         reviewItems.push({ sku: row.sku, ean: row.ean, name: row.name, quantity: row.quantity, reason: m.reason ?? 'Niejednoznaczne dopasowanie.', candidateOfferIds: m.candidateOfferIds ?? [] })
         log({ sku: row.sku, ean: row.ean, offerId: null, qtyBefore: null, qtyAfter: row.quantity, status: 'SKIPPED', message: `WYMAGA WERYFIKACJI: ${m.reason ?? ''}` })
       } else {
         skipped++
+        stats.noMatch++
         log({ sku: row.sku, ean: row.ean, offerId: null, qtyBefore: null, qtyAfter: row.quantity, status: 'SKIPPED', message: `Brak dopasowania: ${m.reason ?? ''}` })
+      }
+    }
+
+    if (options.onMatched && toPush.length > 0) {
+      try {
+        await options.onMatched(toPush.filter((p) => p.row.sku).map((p) => ({ offerId: p.offerId, sku: p.row.sku, via: p.via })))
+      } catch {
+        /* zapamiętanie dopasowań jest pomocnicze — nie blokuje wysyłki */
       }
     }
 
@@ -152,7 +188,7 @@ export async function runInventorySync(
             if (ok) {
               changed++
               updatedSkus.add(b.row.sku)
-              deps.loopGuard.recordPush(channel, b.row.sku, b.quantity)
+              deps.loopGuard.recordPush(guardKey, b.row.sku, b.quantity)
               log({ sku: b.row.sku, ean: b.row.ean, offerId: b.offerId, qtyBefore: null, qtyAfter: b.quantity, status: 'SUCCESS', message: `Zaktualizowano ofertę ${b.offerId}.` })
             } else {
               errors++
@@ -178,9 +214,9 @@ export async function runInventorySync(
     // 6) Zrzut dziennika (raz).
     await flushLogs()
 
-    return summary(channel, startedAt, checked, changed, needsReview, errors, skipped, reviewItems)
+    return { ...summary(channel, startedAt, checked, changed, needsReview, errors, skipped, reviewItems), stats }
   } finally {
-    deps.loopGuard.release(channel)
+    deps.loopGuard.release(guardKey)
     // Gdyby przebieg padł wyjątkiem przed zrzutem — dopisujemy logi best-effort.
     try {
       await flushLogs()

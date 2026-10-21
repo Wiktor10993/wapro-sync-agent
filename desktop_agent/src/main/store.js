@@ -707,6 +707,22 @@ export function setAllegroStockHashes(accountId = 'primary', hashes) {
   store.set('cache.stockHashesAllegroExtra', extra)
 }
 
+/**
+ * v6.4: od kiedy zdejmujemy stan WAPRO za sprzedaż Allegro (per konto).
+ * Ustawiane przy pierwszym udanym pobraniu — zamówienia sprzed tej chwili NIE są
+ * zdejmowane wstecz (mogły być już obsłużone w WAPRO innym torem).
+ */
+export function getAllegroSalesSince(accountId) {
+  const all = store.get('cache.allegroSalesSince') || {}
+  return all[accountId] || null
+}
+
+export function setAllegroSalesSince(accountId, iso) {
+  const all = { ...(store.get('cache.allegroSalesSince') || {}) }
+  all[accountId] = iso
+  store.set('cache.allegroSalesSince', all)
+}
+
 const SYNC_MARK_KEYS = {
   up: 'cache.lastSyncUpAt',
   down: 'cache.lastSyncDownAt',

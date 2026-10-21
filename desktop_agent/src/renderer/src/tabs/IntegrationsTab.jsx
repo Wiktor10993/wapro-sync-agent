@@ -495,6 +495,13 @@ function AllegroAccountsCard({ busy, run }) {
   }, [reload])
 
   const extras = accounts.filter((a) => a.id !== 'primary')
+  // To samo konto Allegro autoryzowane dwa razy (przeglądarka była zalogowana na pierwsze).
+  const duplicateOf = (a) => {
+    const login = String(a.accountLogin || '').toLowerCase()
+    if (!login) return null
+    const first = accounts.find((x) => x.authorized && String(x.accountLogin || '').toLowerCase() === login)
+    return first && first.id !== a.id ? first : null
+  }
 
   // KROK 1: tylko utwórz konto (nowy wiersz pojawia się od razu). Autoryzacja to
   // osobny krok — dokładnie jak przy koncie głównym. Nie używamy window.prompt
@@ -531,7 +538,8 @@ function AllegroAccountsCard({ busy, run }) {
       </div>
       <p className="hint">
         Ta sama aplikacja (Client ID/Secret z sekcji wyżej), osobne konta sprzedawcy. Stany z WAPRO lecą na wszystkie
-        konta; zamówienia z każdego konta zdejmują stan w WAPRO.
+        konta; zamówienia z każdego konta zdejmują stan w WAPRO. Przed autoryzacją kolejnego konta wyloguj się z Allegro
+        w przeglądarce (albo użyj okna prywatnego) — inaczej podłączy się ponownie konto, na które jesteś zalogowany.
       </p>
 
       <div className="account-list">
@@ -549,7 +557,15 @@ function AllegroAccountsCard({ busy, run }) {
                 <Tag tone="warn">niepołączone</Tag>
               )}
               {a.tokenExpired && <Tag tone="warn">token wygasł</Tag>}
+              {duplicateOf(a) && <Tag tone="error">to samo konto co „{duplicateOf(a).label}"</Tag>}
             </div>
+            {duplicateOf(a) && (
+              <p className="hint">
+                To konto jest pomijane przy synchronizacji. Wyloguj się z Allegro w przeglądarce albo po kliknięciu
+                „Autoryzuj ponownie" wklej link ze schowka w oknie prywatnym (Ctrl+Shift+N) i zaloguj się na właściwe konto.
+              </p>
+            )}
+            {!duplicateOf(a) && a.lastCheckOk === false && a.lastCheckMessage && <p className="hint">{a.lastCheckMessage}</p>}
             <div className="account-card__actions">
               <button type="button" className="btn btn--tiny" disabled={busy === `al-auth-${a.id}`} onClick={() => authorize(a.id)}>
                 {busy === `al-auth-${a.id}` ? 'Czekam na przeglądarkę…' : a.authorized ? 'Autoryzuj ponownie' : 'Autoryzuj'}
