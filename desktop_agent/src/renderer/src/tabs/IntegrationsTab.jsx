@@ -122,37 +122,6 @@ export default function IntegrationsTab({ busy, run }) {
     }
   }
 
-  const authorize = async () => {
-    setAlResult(null)
-    const r = await run('authorize', () => window.agent.authorizeAllegro())
-    if (r) {
-      setAlResult(
-        r.ok
-          ? { ok: true, message: `Autoryzacja zakończona${r.accountLogin ? ` — konto ${r.accountLogin}` : ''}.` }
-          : { ok: false, message: r.error }
-      )
-      load()
-    }
-  }
-
-  const testAl = async () => {
-    setAlResult(null)
-    const r = await run('test-al', () => window.agent.testAllegro())
-    if (r) {
-      setAlResult(r)
-      load()
-    }
-  }
-
-  const disconnect = async () => {
-    if (!confirm('Odłączyć konto Allegro? Tokeny zostaną usunięte, dane aplikacji zostaną zachowane.')) {
-      return
-    }
-    await run('disconnect', () => window.agent.disconnectAllegro(), 'Konto Allegro odłączone.')
-    setAlResult(null)
-    load()
-  }
-
   const redirectHint = al.redirectUri || alStatus.redirectUri
 
   return (
@@ -251,9 +220,11 @@ export default function IntegrationsTab({ busy, run }) {
       {/* ================= Allegro ================= */}
       <form className="card" onSubmit={saveAl}>
         <div className="card__header">
-          <h2>Allegro</h2>
-          <AllegroBadge status={alStatus} />
+          <h2>Aplikacja Allegro</h2>
         </div>
+        <p className="hint">
+          Dane aplikacji z panelu Allegro — wspólne dla wszystkich kont. Konta sprzedawcy podłączasz niżej, w sekcji „Konta Allegro".
+        </p>
 
         <Field label="Client ID" hint="Panel Allegro → Moje aplikacje → dane aplikacji.">
           <input
@@ -319,84 +290,13 @@ export default function IntegrationsTab({ busy, run }) {
           <button type="submit" className="btn" disabled={busy === 'save-al'}>
             {busy === 'save-al' ? 'Zapisuję…' : 'Zapisz ustawienia'}
           </button>
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={authorize}
-            disabled={busy === 'authorize' || !al.clientId || (!al.clientSecret && !alStatus.hasClientSecret)}
-          >
-            {busy === 'authorize' ? 'Czekam na przeglądarkę…' : 'Autoryzuj Allegro (OAuth)'}
-          </button>
         </div>
 
-        <div className="button-row button-row--tight">
-          <button
-            type="button"
-            className="btn"
-            onClick={testAl}
-            disabled={busy === 'test-al' || !alStatus.authorized}
-          >
-            {busy === 'test-al' ? 'Sprawdzam…' : 'Testuj połączenie Allegro'}
-          </button>
-          {alStatus.authorized && (
-            <button type="button" className="btn btn--danger" onClick={disconnect} disabled={busy === 'disconnect'}>
-              Odłącz konto
-            </button>
-          )}
-        </div>
-
-        {busy === 'authorize' && (
-          <div className="result result--warn">
-            Otworzyłem przeglądarkę. Zaloguj się do Allegro i zatwierdź dostęp — aplikacja czeka
-            na powrót (limit 5 minut). Jeśli nic się nie otworzyło, sprawdź, czy przeglądarka
-            domyślna nie jest zablokowana.
-          </div>
-        )}
-
-        <ResultBox result={alResult} status={alStatus} />
-
-        {alStatus.authorized && (
-          <dl className="kv" style={{ marginTop: 14 }}>
-            {alStatus.accountLogin && <><dt>Konto</dt><dd>{alStatus.accountLogin}</dd></>}
-            <dt>Token ważny do</dt>
-            <dd>
-              {formatDate(alStatus.expiresAt)}{' '}
-              {alStatus.tokenExpired && <Tag tone="warn">wygasł</Tag>}
-            </dd>
-            <dt>Odświeżanie</dt>
-            <dd>
-              {alStatus.hasRefreshToken ? (
-                <Tag tone="ok">automatyczne</Tag>
-              ) : (
-                <Tag tone="warn">brak refresh_token</Tag>
-              )}
-            </dd>
-            {alStatus.scope && (
-              <>
-                <dt>Zakresy</dt>
-                <dd className="small">{alStatus.scope}</dd>
-              </>
-            )}
-          </dl>
-        )}
-
-        <div className="button-row">
-          <button
-            type="button"
-            className="btn btn--tiny"
-            disabled={busy === 'al-orders' || !alStatus.authorized}
-            onClick={async () => {
-              const r = await run('al-orders', () => window.agent.fetchAllegroOrders({ limit: 20 }))
-              if (r) setPreview({ source: 'Allegro', ...r })
-            }}
-          >
-            {busy === 'al-orders' ? 'Pobieram…' : 'Pobierz zamówienia do realizacji'}
-          </button>
-        </div>
+        <ResultBox result={alResult} status={{}} />
       </form>
 
-      {/* ================= Dodatkowe konta Allegro ================= */}
-      <AllegroAccountsCard busy={busy} run={run} />
+      {/* ================= Konta Allegro (równorzędne) ================= */}
+      <AllegroAccountsCard busy={busy} run={run} canAuthorize={Boolean(alStatus.clientId && alStatus.hasClientSecret)} onPreview={setPreview} />
 
       {/* ================= Podgląd pobranych zamówień ================= */}
       {preview && (
@@ -478,10 +378,11 @@ function ConnectionBadge({ status, label }) {
 }
 
 /**
- * Zarządzanie dodatkowymi kontami Allegro (ta sama aplikacja, osobne autoryzacje).
- * Konto główne konfiguruje się w sekcji „Allegro" wyżej; tu konta 2..N.
+ * Konta Allegro — wszystkie RÓWNORZĘDNE (stany z WAPRO lecą na każde, sprzedaż
+ * z każdego zdejmuje stan w WAPRO). Ta sama aplikacja (Client ID/Secret wyżej),
+ * osobne autoryzacje. Konto „primary" różni się tylko miejscem zapisu tokenów.
  */
-function AllegroAccountsCard({ busy, run }) {
+function AllegroAccountsCard({ busy, run, canAuthorize, onPreview }) {
   const [accounts, setAccounts] = useState([])
   const [newLabel, setNewLabel] = useState('')
 
@@ -494,18 +395,15 @@ function AllegroAccountsCard({ busy, run }) {
     reload()
   }, [reload])
 
-  const extras = accounts.filter((a) => a.id !== 'primary')
-  // To samo konto Allegro autoryzowane dwa razy (przeglądarka była zalogowana na pierwsze).
+  // To samo konto Allegro autoryzowane dwa razy (przeglądarka była zalogowana na inne konto).
   const duplicateOf = (a) => {
     const login = String(a.accountLogin || '').toLowerCase()
-    if (!login) return null
+    if (!login || !a.authorized) return null
     const first = accounts.find((x) => x.authorized && String(x.accountLogin || '').toLowerCase() === login)
     return first && first.id !== a.id ? first : null
   }
+  const connected = accounts.filter((a) => a.authorized && !duplicateOf(a)).length
 
-  // KROK 1: tylko utwórz konto (nowy wiersz pojawia się od razu). Autoryzacja to
-  // osobny krok — dokładnie jak przy koncie głównym. Nie używamy window.prompt
-  // (Electron go nie wspiera) ani nie blokujemy listy OAuthem.
   const addAccount = async () => {
     const r = await run('al-add', () => window.agent.addAllegroAccount(newLabel.trim()), 'Dodano konto — kliknij „Autoryzuj".')
     if (r?.accounts) {
@@ -517,6 +415,7 @@ function AllegroAccountsCard({ busy, run }) {
   }
   const authorize = async (id) => {
     const r = await run(`al-auth-${id}`, () => window.agent.authorizeAllegro(id))
+    if (r && r.ok === false && r.error) window.alert(r.error)
     if (r?.accounts) setAccounts(r.accounts)
     else reload()
   }
@@ -524,60 +423,82 @@ function AllegroAccountsCard({ busy, run }) {
     await run(`al-test-${id}`, () => window.agent.testAllegro(id))
     reload()
   }
-  const remove = async (id) => {
-    if (!window.confirm('Usunąć to konto Allegro? Tokeny zostaną skasowane.')) return
-    const r = await run(`al-del-${id}`, () => window.agent.disconnectAllegro(id))
+  const remove = async (a) => {
+    const msg =
+      a.id === 'primary'
+        ? 'Odłączyć to konto Allegro? Tokeny zostaną usunięte (dane aplikacji zostają) — potem możesz autoryzować inne konto w tym miejscu.'
+        : 'Usunąć to konto Allegro? Tokeny zostaną skasowane.'
+    if (!window.confirm(msg)) return
+    const r = await run(`al-del-${a.id}`, () => window.agent.disconnectAllegro(a.id))
     if (r?.accounts) setAccounts(r.accounts)
     else reload()
+  }
+  const orders = async (a) => {
+    const r = await run(`al-orders-${a.id}`, () => window.agent.fetchAllegroOrders({ accountId: a.id, limit: 20 }))
+    if (r) onPreview?.({ source: `Allegro — ${a.label}`, ...r })
   }
 
   return (
     <section className="card">
       <div className="card__header">
-        <h2>Dodatkowe konta Allegro</h2>
+        <h2>Konta Allegro</h2>
+        <Tag tone={connected >= 2 ? 'ok' : 'warn'}>połączone: {connected}</Tag>
       </div>
       <p className="hint">
-        Ta sama aplikacja (Client ID/Secret z sekcji wyżej), osobne konta sprzedawcy. Stany z WAPRO lecą na wszystkie
-        konta; zamówienia z każdego konta zdejmują stan w WAPRO. Przed autoryzacją kolejnego konta wyloguj się z Allegro
-        w przeglądarce (albo użyj okna prywatnego) — inaczej podłączy się ponownie konto, na które jesteś zalogowany.
+        Wszystkie konta są równorzędne: stany z WAPRO lecą na każde konto, sprzedaż z każdego konta zdejmuje stan w WAPRO.
+        Przed autoryzacją kolejnego konta <strong>wyloguj się z Allegro w przeglądarce</strong> (albo wklej link ze schowka
+        w oknie prywatnym, Ctrl+Shift+N) — inaczej podłączy się konto, na które przeglądarka jest zalogowana.
       </p>
 
       <div className="account-list">
-        {extras.length === 0 && (
-          <p className="empty-state">Brak dodatkowych kont — dodaj pierwsze poniżej.</p>
-        )}
-
-        {extras.map((a) => (
-          <div key={a.id} className="account-card">
-            <div className="account-card__head">
-              <span className="account-card__name">{a.label}</span>
-              {a.authorized ? (
-                <Tag tone="ok">połączone{a.accountLogin ? ` — ${a.accountLogin}` : ''}</Tag>
-              ) : (
-                <Tag tone="warn">niepołączone</Tag>
+        {accounts.map((a, i) => {
+          const dup = duplicateOf(a)
+          return (
+            <div key={a.id} className="account-card">
+              <div className="account-card__head">
+                <span className="account-card__name">Konto {i + 1}: {a.label}</span>
+                {a.authorized ? (
+                  <Tag tone={dup ? 'error' : 'ok'}>{a.accountLogin ? `login ${a.accountLogin}` : 'połączone'}</Tag>
+                ) : (
+                  <Tag tone="warn">niepołączone</Tag>
+                )}
+                {a.tokenExpired && !a.hasRefreshToken && <Tag tone="warn">token wygasł</Tag>}
+                {dup && <Tag tone="error">to samo konto co „{dup.label}" — pomijane</Tag>}
+              </div>
+              {dup && (
+                <p className="hint">
+                  To konto nie jest synchronizowane, bo wskazuje ten sam login co „{dup.label}". Wyloguj się z Allegro
+                  w przeglądarce i kliknij „Autoryzuj ponownie", logując się na właściwe konto.
+                </p>
               )}
-              {a.tokenExpired && <Tag tone="warn">token wygasł</Tag>}
-              {duplicateOf(a) && <Tag tone="error">to samo konto co „{duplicateOf(a).label}"</Tag>}
+              {!dup && a.lastCheckOk === false && a.lastCheckMessage && <p className="hint">{a.lastCheckMessage}</p>}
+              <div className="account-card__actions">
+                <button
+                  type="button"
+                  className="btn btn--tiny"
+                  disabled={busy === `al-auth-${a.id}` || !canAuthorize}
+                  onClick={() => authorize(a.id)}
+                >
+                  {busy === `al-auth-${a.id}` ? 'Czekam na przeglądarkę…' : a.authorized ? 'Autoryzuj ponownie' : 'Autoryzuj'}
+                </button>
+                <button type="button" className="btn btn--tiny" disabled={busy === `al-test-${a.id}` || !a.authorized} onClick={() => test(a.id)}>
+                  {busy === `al-test-${a.id}` ? 'Sprawdzam…' : 'Testuj'}
+                </button>
+                <button type="button" className="btn btn--tiny" disabled={busy === `al-orders-${a.id}` || !a.authorized} onClick={() => orders(a)}>
+                  {busy === `al-orders-${a.id}` ? 'Pobieram…' : 'Zamówienia'}
+                </button>
+                {(a.id !== 'primary' || a.authorized) && (
+                  <button type="button" className="btn btn--tiny btn--danger" onClick={() => remove(a)}>
+                    {a.id === 'primary' ? 'Odłącz' : 'Usuń'}
+                  </button>
+                )}
+              </div>
             </div>
-            {duplicateOf(a) && (
-              <p className="hint">
-                To konto jest pomijane przy synchronizacji. Wyloguj się z Allegro w przeglądarce albo po kliknięciu
-                „Autoryzuj ponownie" wklej link ze schowka w oknie prywatnym (Ctrl+Shift+N) i zaloguj się na właściwe konto.
-              </p>
-            )}
-            {!duplicateOf(a) && a.lastCheckOk === false && a.lastCheckMessage && <p className="hint">{a.lastCheckMessage}</p>}
-            <div className="account-card__actions">
-              <button type="button" className="btn btn--tiny" disabled={busy === `al-auth-${a.id}`} onClick={() => authorize(a.id)}>
-                {busy === `al-auth-${a.id}` ? 'Czekam na przeglądarkę…' : a.authorized ? 'Autoryzuj ponownie' : 'Autoryzuj'}
-              </button>
-              <button type="button" className="btn btn--tiny" disabled={busy === `al-test-${a.id}` || !a.authorized} onClick={() => test(a.id)}>
-                {busy === `al-test-${a.id}` ? 'Sprawdzam…' : 'Testuj'}
-              </button>
-              <button type="button" className="btn btn--tiny btn--danger" onClick={() => remove(a.id)}>Usuń</button>
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
+
+      {!canAuthorize && <p className="hint">Najpierw zapisz Client ID i Client Secret w sekcji „Aplikacja Allegro".</p>}
 
       <div className="account-add">
         <input
@@ -594,13 +515,6 @@ function AllegroAccountsCard({ busy, run }) {
       </div>
     </section>
   )
-}
-
-function AllegroBadge({ status }) {
-  if (!status.authorized) return <Tag tone="muted">niepołączone</Tag>
-  if (status.tokenExpired && !status.hasRefreshToken) return <Tag tone="error">token wygasł</Tag>
-  if (status.lastCheckOk === false) return <Tag tone="error">błąd</Tag>
-  return <Tag tone="ok">autoryzowane</Tag>
 }
 
 function ResultBox({ result, status }) {

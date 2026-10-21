@@ -747,6 +747,30 @@ export function resetStockCache(scope = 'all') {
   }
 }
 
+/**
+ * Zapomina hashe wskazanych SKU — następny SyncUp wyśle ich stan ponownie
+ * (np. po zmianie mapowania na inną ofertę).
+ * @param {'baselinker'|'allegro'} scope
+ * @param {Iterable<string>} skus
+ */
+export function forgetStockHashes(scope, skus) {
+  const list = [...skus].filter(Boolean)
+  if (list.length === 0) return
+  const drop = (obj) => {
+    const out = { ...(obj || {}) }
+    for (const s of list) delete out[s]
+    return out
+  }
+  if (scope === 'baselinker') {
+    store.set('cache.stockHashes', drop(store.get('cache.stockHashes')))
+    return
+  }
+  store.set('cache.stockHashesAllegro', drop(store.get('cache.stockHashesAllegro')))
+  const extra = { ...(store.get('cache.stockHashesAllegroExtra') || {}) }
+  for (const k of Object.keys(extra)) extra[k] = drop(extra[k])
+  store.set('cache.stockHashesAllegroExtra', extra)
+}
+
 /** Bezpieczny zrzut ustawień do GUI — bez sekretów. */
 export function getPublicSettings() {
   return {

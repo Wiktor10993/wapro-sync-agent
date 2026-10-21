@@ -44,40 +44,9 @@ export async function exportTemplate(folder, log = () => {}) {
   return { file, count: rows.length }
 }
 
-// --- parser CSV (separator „;" lub ",", cudzysłowy RFC 4180, BOM) ------------
-
-export function parseCsv(text) {
-  let s = String(text ?? '')
-  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1) // BOM
-  // Wykryj separator z pierwszej linii nagłówka.
-  const firstLine = s.slice(0, s.search(/\r?\n/) >= 0 ? s.search(/\r?\n/) : s.length)
-  const sep = (firstLine.match(/;/g)?.length ?? 0) >= (firstLine.match(/,/g)?.length ?? 0) ? ';' : ','
-
-  const rows = []
-  let field = ''
-  let row = []
-  let inQuotes = false
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i]
-    if (inQuotes) {
-      if (c === '"') {
-        if (s[i + 1] === '"') { field += '"'; i++ } else inQuotes = false
-      } else field += c
-    } else if (c === '"') inQuotes = true
-    else if (c === sep) { row.push(field); field = '' }
-    else if (c === '\n') { row.push(field); rows.push(row); field = ''; row = [] }
-    else if (c === '\r') { /* pomiń, \n domknie wiersz */ }
-    else field += c
-  }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row) }
-  if (rows.length === 0) return { headers: [], records: [] }
-
-  const headers = rows[0].map((h) => h.trim().toLowerCase())
-  const records = rows.slice(1)
-    .filter((r) => r.some((v) => String(v).trim() !== ''))
-    .map((r) => Object.fromEntries(headers.map((h, k) => [h, (r[k] ?? '').trim()])))
-  return { headers, records }
-}
+// Parser CSV żyje w mappingCsvCore.js (czysty, testowalny) — re-eksport dla zgodności.
+export { parseCsv } from './mappingCsvCore.js'
+import { parseCsv } from './mappingCsvCore.js'
 
 // --- import ------------------------------------------------------------------
 

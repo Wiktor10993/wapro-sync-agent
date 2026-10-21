@@ -281,6 +281,11 @@ export class LocalDatabase {
     if (!cols.some((c) => c.name === 'category')) {
       this.db.exec("ALTER TABLE sync_errors ADD COLUMN category TEXT NOT NULL DEFAULT 'error'")
     }
+    // v6.5: konto Allegro, z którego kolumny CSV pochodzi mapowanie ('' = nieznane / BaseLinker).
+    const mm = this.db.prepare('PRAGMA table_info(manual_mappings)').all() as Array<{ name: string }>
+    if (!mm.some((c) => c.name === 'account_id')) {
+      this.db.exec("ALTER TABLE manual_mappings ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+    }
   }
 
   close(): void {
@@ -536,15 +541,48 @@ export class LocalDatabase {
   }
 
   // --- masowe mapowanie ręczne (override wysyłki stanów) -----------------
-  upsertManualMapping(m: { channel: Channel; offerId: string; sku?: string; ean?: string }): void {
+  upsertManualMapping(m: { channel: Channel; offerId: string; sku?: string; ean?: string; accountId?: string }): void {
     this.db
       .prepare(
-        `INSERT INTO manual_mappings (channel, offer_id, sku, ean, updated_at)
-         VALUES (@channel, @offerId, @sku, @ean, datetime('now'))
+        `INSERT INTO manual_mappings (channel, offer_id, sku, ean, account_id, updated_at)
+         VALUES (@channel, @offerId, @sku, @ean, @accountId, datetime('now'))
          ON CONFLICT(channel, offer_id) DO UPDATE SET
-           sku = excluded.sku, ean = excluded.ean, updated_at = datetime('now')`
+           sku = excluded.sku, ean = excluded.ean, account_id = excluded.account_id, updated_at = datetime('now')`
       )
-      .run({ channel: m.channel, offerId: String(m.offerId), sku: m.sku ?? '', ean: m.ean ?? '' })
+      .run({ channel: m.channel, offerId: String(m.offerId), sku: m.sku ?? '', ean: m.ean ?? '', accountId: m.accountId ?? '' })
+  }
+
+  /**
+   * Usuwa wcześniejsze ręczne mapowania produktu w danym kanale/koncie — import
+   * z nowym numerem oferty ZASTĘPUJE stary (inaczej SKU wskazywałby dwie oferty).
+   * Dla Allegro z nieznanym kontem ('') zastępujemy tylko wpisy też bez konta.
+   */
+  replaceManualMappingsForSku(channel: Channel, sku: string, accountId = ''): void {
+    if (!sku) return
+    if (channel === 'baselinker') {
+      this.db.prepare("DELETE FROM manual_mappings WHERE channel = 'baselinker' AND sku = ?").run(sku)
+    } else {
+      this.db.prepare("DELETE FROM manual_mappings WHERE channel = 'allegro' AND sku = ? AND account_id = ?").run(sku, accountId)
+    }
+  }
+
+  /** Ręczne mapowania z kontem — do wypełnienia wzorca CSV. */
+  listManualMappingsFull(channel: Channel): Array<{ offerId: string; sku: string; ean: string; accountId: string }> {
+    return (this.db.prepare('SELECT offer_id, sku, ean, account_id FROM manual_mappings WHERE channel = ?').all(channel) as any[]).map((r) => ({
+      offerId: String(r.offer_id),
+      sku: r.sku ?? '',
+      ean: r.ean ?? '',
+      accountId: r.account_id ?? ''
+    }))
+  }
+
+  /** Zapamiętane dopasowania konta (offerId, sku, via) — do wypełnienia wzorca CSV. */
+  listOfferSkus(accountId: string): Array<{ offerId: string; sku: string; via: string }> {
+    return (this.db.prepare('SELECT offer_id, sku, via FROM offer_sku_map WHERE account_id = ?').all(accountId) as any[]).map((r) => ({
+      offerId: String(r.offer_id),
+      sku: String(r.sku),
+      via: String(r.via ?? '')
+    }))
   }
 
   /** Wszystkie ręczne mapowania kanału — do override'u w orchestratorze. */
