@@ -20,6 +20,8 @@ export interface OfferCandidate {
   sku: string
   ean: string
   name: string
+  /** Dodatkowe kody traktowane jak SKU (np. „Kod producenta" z parametrów oferty Allegro). */
+  codes?: string[]
 }
 
 export type MatchVia = 'ean' | 'sku' | 'name'
@@ -80,6 +82,24 @@ export interface SyncSummary {
   errors: number
   skipped: number
   reviewItems: ReviewItem[]
+  /** Diagnostyka dopasowań (tylko pełny przebieg z pobraniem ofert). */
+  stats?: SyncMatchStats
+}
+
+/** Rozbicie dopasowań w przebiegu — do logu „dlaczego nic się nie wysłało". */
+export interface SyncMatchStats {
+  /** Ile ofert zwrócił kanał/konto. */
+  offers: number
+  /** Ile ręcznych mapowań wskazuje oferty z tej listy. */
+  manualInAccount: number
+  /** Ile ręcznych mapowań ogółem (dla kanału). */
+  manualTotal: number
+  /** Zmienione pozycje (delta) dopasowane wg metody. */
+  viaManual: number
+  viaEan: number
+  viaSku: number
+  viaName: number
+  noMatch: number
 }
 
 /** Wynik delta-sync (tylko zmienione pozycje + nowe hashe). */

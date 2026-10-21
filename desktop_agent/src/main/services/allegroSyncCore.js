@@ -104,3 +104,90 @@ export function pickOfferId(maps, item) {
 
   return null
 }
+
+// ---------------------------------------------------------------------------
+// Kody z pełnej oferty (GET /sale/product-offers/{id}) — automapowanie
+// ---------------------------------------------------------------------------
+
+/** Id parametrów Allegro: „Kod producenta" i „EAN (GTIN)". */
+const PARAM_PRODUCER_CODE = '224017'
+const PARAM_EAN = '225693'
+
+function firstParamValue(params, id, nameRe) {
+  for (const p of Array.isArray(params) ? params : []) {
+    if (!p) continue
+    if (String(p.id ?? '') !== id && !nameRe.test(String(p.name ?? ''))) continue
+    const v = String((Array.isArray(p.values) ? p.values[0] : p.value) ?? '').trim()
+    if (v) return v
+  }
+  return ''
+}
+
+/**
+ * Wyłuskuje z pełnej oferty kody do dopasowania: sygnaturę (external.id), EAN
+ * i „Kod producenta" — z parametrów oferty i produktów z productSet.
+ * Lista `/sale/offers` tych parametrów nie zwraca, stąd osobny odczyt.
+ *
+ * @returns {{externalId:string, ean:string, producerCode:string}}
+ */
+export function extractOfferCodes(offer) {
+  if (!offer || typeof offer !== 'object') return { externalId: '', ean: '', producerCode: '' }
+  const paramSets = [offer.parameters]
+  for (const ps of Array.isArray(offer.productSet) ? offer.productSet : []) paramSets.push(ps?.product?.parameters)
+  let ean = ''
+  let producerCode = ''
+  for (const params of paramSets) {
+    if (!ean) ean = firstParamValue(params, PARAM_EAN, /^(EAN|GTIN)/i)
+    if (!producerCode) producerCode = firstParamValue(params, PARAM_PRODUCER_CODE, /^kod producenta$/i)
+  }
+  return {
+    externalId: String(offer.external?.id ?? '').trim(),
+    ean: ean || extractEanFromOffer(offer),
+    producerCode
+  }
+}
+
+/**
+ * Ustala SKU (indeks WAPRO) pozycji zamówienia Allegro:
+ *   1) mapowanie oferta → SKU (ręczne z CSV albo zapamiętane przy wysyłce stanów)
+ *      — potwierdzone, że wskazuje istniejący indeks WAPRO,
+ *   2) sygnatura oferty (offer.external.id).
+ * @param {Map<string,string>} offerSku Map offerId → sku
+ * @returns {string} '' gdy nie da się ustalić.
+ */
+export function resolveLineSku(lineItem, offerSku) {
+  const offerId = String(lineItem?.offer?.id ?? '').trim()
+  const mapped = offerId && offerSku?.get(offerId)
+  if (mapped) return String(mapped).trim()
+  return String(lineItem?.offer?.external?.id ?? '').trim()
+}
+
+/**
+ * Łączy listę ofert z cache kodów z pełnej oferty (czysta funkcja).
+ * @param {Map<string,{externalId:string,ean:string,producerCode:string}>} cache
+ */
+export function mergeOfferDetails(offers, cache) {
+  return offers.map((o) => {
+    const d = cache.get(String(o.offerId))
+    if (!d) return { ...o, codes: [] }
+    return {
+      ...o,
+      sku: o.sku || d.externalId || '',
+      ean: o.ean || d.ean || '',
+      codes: d.producerCode ? [d.producerCode] : []
+    }
+  })
+}
+
+/** Zapytanie do /order/checkout-forms (czysta funkcja — testowalna). */
+export function buildOrdersQuery({ limit = 20, offset = 0, status = '', fulfillmentStatus = '', boughtFrom = '' } = {}) {
+  const query = new URLSearchParams({ limit: String(Math.max(1, Math.min(100, Number(limit) || 20))) })
+  if (offset > 0) query.set('offset', String(Math.trunc(offset)))
+  if (status) query.set('status', status)
+  if (fulfillmentStatus) query.set('fulfillment.status', fulfillmentStatus)
+  if (boughtFrom) {
+    query.set('lineItems.boughtAt.gte', boughtFrom)
+    query.set('sort', 'lineItems.boughtAt')
+  }
+  return query.toString()
+}

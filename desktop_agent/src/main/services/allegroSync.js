@@ -205,6 +205,31 @@ export async function listOffersWithStock(accountId = 'primary', log = () => {})
   return out
 }
 
+/**
+ * Pełne dane ofert (GET /sale/product-offers/{id}) — z parametrami (EAN, „Kod
+ * producenta"), których lista /sale/offers nie zwraca. Równolegle `concurrency`.
+ * @returns {Promise<Map<string, object|null>>} null = oferta niedostępna (404/403)
+ */
+export async function getOffersFull(accountId, offerIds, log = () => {}, { concurrency = 4 } = {}) {
+  const { token, sandbox } = await resolveCtx(accountId, log)
+  const out = new Map()
+  const queue = [...offerIds]
+  const worker = async () => {
+    while (queue.length) {
+      const id = String(queue.shift())
+      try {
+        out.set(id, await allegroApi(sandbox, token, `/sale/product-offers/${encodeURIComponent(id)}`, { timeoutMs: 30000 }))
+      } catch (err) {
+        if (err?.status === 404 || err?.status === 403) out.set(id, null)
+        // inne błędy (sieć/limit): pomijamy — spróbujemy w kolejnym cyklu
+      }
+      await yieldToEventLoop()
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker))
+  return out
+}
+
 /** Oferty ze stanem ze WSZYSTKICH autoryzowanych kont (eksport/raport). */
 export async function listOffersWithStockAll(log = () => {}) {
   const accounts = listAllegroAccountsPublic().filter((a) => a.authorized)

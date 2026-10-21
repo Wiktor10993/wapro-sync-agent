@@ -1,13 +1,15 @@
 import http from 'node:http'
 import crypto from 'node:crypto'
-import { shell } from 'electron'
+import { clipboard, shell } from 'electron'
 import {
   getIntegrations,
   getAllegroAccount,
+  listAllegroAccountsPublic,
   saveAllegroAccountTokens,
   setAllegroAccountCheck,
   removeAllegroAccount
 } from '../store.js'
+import { buildOrdersQuery } from './allegroSyncCore.js'
 
 /**
  * AUTORYZACJA ALLEGRO W APLIKACJI DESKTOPOWEJ
@@ -164,23 +166,36 @@ export async function authorizeAllegro(accountId = 'primary', log = () => {}) {
       verifier
     })
 
+    // Najpierw sprawdzamy, na jakie konto weszliśmy — przeglądarka bywa zalogowana
+    // na INNE konto (np. główne, gdy autoryzujemy drugie). Takiego tokenu nie zapisujemy.
+    let accountLogin = ''
+    try {
+      const me = await apiGet(allegro.sandbox, tokens.access_token, '/me')
+      accountLogin = String(me?.login ?? me?.id ?? '')
+    } catch {
+      /* brak /me nie unieważnia autoryzacji */
+    }
+
+    // Konto główne zawsze przyjmujemy; duplikat sprawdzamy przy kontach dodatkowych.
+    const duplicate = accountLogin && accountId !== 'primary'
+      ? listAllegroAccountsPublic().find(
+          (a) => a.id !== accountId && a.authorized && String(a.accountLogin || '').toLowerCase() === accountLogin.toLowerCase()
+        )
+      : null
+    if (duplicate) {
+      throw new Error(
+        `Zalogowano na konto ${accountLogin}, które jest już podłączone jako „${duplicate.label}". ` +
+          'Wyloguj się z Allegro w przeglądarce (albo wklej link autoryzacji w oknie prywatnym — jest w schowku) i zaloguj się na właściwe konto.'
+      )
+    }
+
     saveAllegroAccountTokens(accountId, {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresIn: tokens.expires_in,
-      scope: tokens.scope
+      scope: tokens.scope,
+      ...(accountLogin ? { accountLogin } : {})
     })
-
-    // Od razu sprawdzamy, na jakie konto weszliśmy — klient bywa zalogowany
-    // w przeglądarce na prywatne, nie firmowe.
-    let accountLogin = ''
-    try {
-      const me = await apiGet(allegro.sandbox, tokens.access_token, '/me')
-      accountLogin = me?.login ?? me?.id ?? ''
-      if (accountLogin) saveAllegroAccountTokens(accountId, { accountLogin })
-    } catch {
-      /* brak /me nie unieważnia autoryzacji */
-    }
 
     const expiresAt = new Date(Date.now() + Number(tokens.expires_in ?? 43200) * 1000).toISOString()
 
@@ -276,6 +291,14 @@ function waitForCode({ redirect, state, challenge, authBase, clientId, redirectU
 
       const url = `${authBase}/authorize?${query.toString()}`
       log('info', 'Allegro: otwieram przeglądarkę, zaloguj się i zatwierdź dostęp…')
+      // Drugie konto: przeglądarka zwykle jest zalogowana na pierwsze. Link w schowku
+      // pozwala dokończyć autoryzację w oknie prywatnym (Ctrl+Shift+N) na właściwym koncie.
+      try {
+        clipboard.writeText(url)
+        log('info', 'Allegro: link autoryzacji skopiowano do schowka — jeśli przeglądarka jest zalogowana na inne konto, wklej go w oknie prywatnym.')
+      } catch {
+        /* schowek niedostępny — zostaje zwykła przeglądarka */
+      }
       shell.openExternal(url)
     })
 
@@ -530,20 +553,98 @@ export function disconnectAllegro(accountId = 'primary', log = () => {}) {
   return { ok: true }
 }
 
-/** Pobranie zamówień wskazanego konta — do korekty stanu WAPRO. */
-export async function fetchAllegroOrders(accountId = 'primary', { limit = 20, status = 'READY_FOR_PROCESSING' } = {}, log = () => {}) {
+/**
+ * Pobranie zamówień wskazanego konta — do korekty stanu WAPRO.
+ *
+ * UWAGA: `READY_FOR_PROCESSING` to wartość parametru `status` (status formularza
+ * zakupu), a NIE `fulfillment.status` (NEW/PROCESSING/SENT…) — pomylenie ich
+ * kończy się odpowiedzią HTTP 400.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.limit] max 100
+ * @param {number} [opts.offset]
+ * @param {string} [opts.status] BOUGHT | FILLED_IN | READY_FOR_PROCESSING | CANCELLED
+ * @param {string} [opts.fulfillmentStatus] NEW | PROCESSING | READY_FOR_SHIPMENT | … (opcjonalnie)
+ * @param {string} [opts.boughtFrom] ISO — dolna granica lineItems.boughtAt
+ */
+export async function fetchAllegroOrders(
+  accountId = 'primary',
+  { limit = 20, offset = 0, status = 'READY_FOR_PROCESSING', fulfillmentStatus = '', boughtFrom = '' } = {},
+  log = () => {}
+) {
   const token = await getValidAccessToken(accountId, log)
   const acc = getAllegroAccount(accountId, { withSecrets: false })
   const sandbox = Boolean(acc?.sandbox)
 
-  const query = new URLSearchParams({ limit: String(Math.min(100, limit)) })
-  if (status) query.set('fulfillment.status', status)
-
-  const data = await apiGet(sandbox, token, `/order/checkout-forms?${query.toString()}`)
+  const data = await apiGet(sandbox, token, `/order/checkout-forms?${buildOrdersQuery({ limit, offset, status, fulfillmentStatus, boughtFrom })}`)
   const orders = data?.checkoutForms ?? []
 
-  log('info', `Allegro: pobrano ${orders.length} zamówień (konto ${acc?.label ?? accountId}, status ${status || 'dowolny'}).`)
+  if (!boughtFrom) {
+    log('info', `Allegro: pobrano ${orders.length} zamówień (konto ${acc?.label ?? accountId}, status ${status || 'dowolny'}).`)
+  }
   return orders
+}
+
+/**
+ * Wszystkie opłacone zamówienia konta od wskazanej chwili (stronicowanie po 100).
+ * @returns {Promise<object[]>}
+ */
+export async function fetchPaidAllegroOrdersSince(accountId, boughtFrom, log = () => {}, { maxPages = 50 } = {}) {
+  const out = []
+  for (let page = 0; page < maxPages; page++) {
+    const batch = await fetchAllegroOrders(
+      accountId,
+      { limit: 100, offset: page * 100, status: 'READY_FOR_PROCESSING', boughtFrom },
+      log
+    )
+    out.push(...batch)
+    if (batch.length < 100) break
+  }
+  return out
+}
+
+/**
+ * Login konta Allegro (z cache w konfiguracji albo z `/me`). '' gdy nie da się ustalić.
+ */
+export async function ensureAccountLogin(accountId, log = () => {}) {
+  const acc = getAllegroAccount(accountId)
+  if (acc?.accountLogin) return acc.accountLogin
+  try {
+    const token = await getValidAccessToken(accountId, log)
+    const me = await apiGet(Boolean(acc?.sandbox), token, '/me')
+    const login = String(me?.login ?? '')
+    if (login) saveAllegroAccountTokens(accountId, { accountLogin: login })
+    return login
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Autoryzowane konta Allegro BEZ duplikatów: gdy dwa wpisy wskazują ten sam login
+ * (np. drugie konto autoryzowano w przeglądarce zalogowanej na pierwsze), drugi
+ * pomijamy — inaczej oba „konta" pisałyby do tych samych ofert, a prawdziwe drugie
+ * konto nie byłoby obsługiwane wcale.
+ * @returns {Promise<Array<{id:string,label:string,accountLogin:string}>>}
+ */
+export async function uniqueAllegroAccounts(log = () => {}) {
+  const out = []
+  const seen = new Map()
+  for (const a of listAllegroAccountsPublic().filter((x) => x.authorized)) {
+    const login = (await ensureAccountLogin(a.id, log)).toLowerCase()
+    if (login && seen.has(login)) {
+      log(
+        'error',
+        `Allegro: konto „${a.label}" jest autoryzowane na TEN SAM login (${login}) co „${seen.get(login)}" — pomijam je. ` +
+          'Wyloguj się z Allegro w przeglądarce (albo użyj okna prywatnego) i kliknij „Autoryzuj ponownie" przy tym koncie.'
+      )
+      setAllegroAccountCheck(a.id, false, `Ten sam login (${login}) co konto „${seen.get(login)}" — autoryzuj właściwe konto ponownie.`)
+      continue
+    }
+    if (login) seen.set(login, a.label)
+    out.push({ ...a, accountLogin: login || a.accountLogin })
+  }
+  return out
 }
 
 async function safeJson(res) {

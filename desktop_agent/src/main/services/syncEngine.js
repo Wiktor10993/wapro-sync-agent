@@ -17,6 +17,8 @@ import { fetchStockSnapshot } from '../wapro/inventoryRepository.js'
 import { getPool } from '../wapro/pool.js'
 import * as blApi from './baselinkerApi.js'
 import * as allegroSync from './allegroSync.js'
+import { uniqueAllegroAccounts } from './allegroAuth.js'
+import { enrichOffers } from './allegroOfferDetails.js'
 import * as restockStore from './restockStore.js'
 import * as analytics from './analytics.js'
 import { getBufferDb } from './bufferDb.js'
@@ -27,7 +29,6 @@ import {
   getSchemaMap,
   getStockHashes,
   getSyncSettings,
-  listAllegroAccountsPublic,
   setAllegroStockHashes,
   setStockHashes
 } from '../store.js'
@@ -100,13 +101,18 @@ function baselinkerAdapter(log) {
   }
 }
 
-function allegroAdapter(accountId, log) {
-  return {
+function allegroAdapter(accountId, log, label = accountId) {
+  const adapter = {
     channel: 'allegro',
     // Osobny klucz Loop Guarda per konto — echo z konta A nie tłumi wysyłki na konto B.
     guardKey: `allegro:${accountId}`,
+    /** offerId z ostatniego pobrania — do diagnostyki mapowań spoza kont. */
+    lastOfferIds: new Set(),
     async fetchOffers() {
-      return allegroSync.listOffers(accountId, log)
+      const offers = await allegroSync.listOffers(accountId, log)
+      adapter.lastOfferIds = new Set(offers.map((o) => String(o.offerId)))
+      // v6.4: automapowanie — EAN i „Kod producenta" z pełnej oferty (cache).
+      return enrichOffers(accountId, offers, log, { label })
     },
     /**
      * #2: WAPRO jest źródłem prawdy.
@@ -158,6 +164,7 @@ function allegroAdapter(accountId, log) {
       return { updatedOfferIds }
     }
   }
+  return adapter
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +197,7 @@ async function loadManualOffers(channel, log) {
 export async function runBaselinkerSync(log = () => {}) {
   await ensureAuditSchema()
   const manualOffers = await loadManualOffers('baselinker', log)
-  return runInventorySync(
+  const summary = await runInventorySync(
     baselinkerAdapter(log),
     {
       loadSnapshot,
@@ -201,6 +208,15 @@ export async function runBaselinkerSync(log = () => {}) {
     },
     { matcher: {}, batch: batchFromSettings(), manualOffers }
   )
+  if (summary.stats) {
+    const st = summary.stats
+    log(
+      'info',
+      `BaseLinker: produktów w katalogu ${st.offers}, mapowań CSV ${st.manualInAccount}/${st.manualTotal}; zmienione pozycje — ` +
+        `ręcznie ${st.viaManual}, EAN ${st.viaEan}, SKU ${st.viaSku}, nazwa ${st.viaName}, bez dopasowania ${st.noMatch}.`
+    )
+  }
+  return summary
 }
 
 /**
@@ -210,19 +226,24 @@ export async function runBaselinkerSync(log = () => {}) {
  */
 export async function runAllegroSync(log = () => {}) {
   await ensureAuditSchema()
-  const accounts = listAllegroAccountsPublic().filter((a) => a.authorized)
+  // v6.4: bez duplikatów loginu (drugie konto autoryzowane na pierwsze → pomijamy z błędem).
+  const accounts = await uniqueAllegroAccounts(log)
   if (accounts.length === 0) {
     log('warn', 'Allegro: brak autoryzowanego konta — pomijam.')
     return { checked: 0, changed: 0, needsReview: 0, errors: 0, accounts: 0 }
   }
 
   const manualOffers = await loadManualOffers('allegro', log)
+  const db = await getBufferDb()
   const agg = { checked: 0, changed: 0, needsReview: 0, errors: 0, accounts: accounts.length }
+  const seenOfferIds = new Set()
+  let fetchedAll = true
   for (const a of accounts) {
+    const adapter = allegroAdapter(a.id, log, a.label)
     try {
-      log('info', `Allegro: synchronizacja stanów — konto „${a.label}".`)
+      log('info', `Allegro: synchronizacja stanów — konto „${a.label}"${a.accountLogin ? ` (${a.accountLogin})` : ''}.`)
       const summary = await runInventorySync(
-        allegroAdapter(a.id, log),
+        adapter,
         {
           loadSnapshot,
           loadHashes: async () => getAllegroStockHashes(a.id),
@@ -230,18 +251,51 @@ export async function runAllegroSync(log = () => {}) {
           writeLog: (entries) => syncLog.insertMany(entries),
           loopGuard
         },
-        { matcher: {}, batch: batchFromSettings(), manualOffers }
+        {
+          matcher: {},
+          batch: batchFromSettings(),
+          manualOffers,
+          // Zapamiętujemy oferta → SKU: zamówienia z ofert bez sygnatury też zdejmą stan WAPRO.
+          onMatched: (pairs) => db.saveOfferSkus(a.id, pairs)
+        }
       )
       agg.checked += summary.checked ?? 0
       agg.changed += summary.changed ?? 0
       agg.needsReview += summary.needsReview ?? 0
       agg.errors += summary.errors ?? 0
+      if (summary.stats) log('info', describeStats(a.label, summary))
+      for (const id of adapter.lastOfferIds) seenOfferIds.add(id)
     } catch (err) {
+      fetchedAll = false
       agg.errors += 1
-      log('error', `Allegro[${a.id}]: synchronizacja nieudana: ${err.message}`)
+      log('error', `Allegro[${a.label}]: synchronizacja nieudana: ${err.message}`)
+    }
+  }
+
+  // Ręczne mapowania wskazujące aukcje, których nie ma na ŻADNYM podłączonym koncie
+  // (np. drugie konto nie jest naprawdę podłączone albo aukcja zarchiwizowana).
+  if (fetchedAll && manualOffers.length > 0 && seenOfferIds.size > 0) {
+    const missing = manualOffers.filter((m) => !seenOfferIds.has(String(m.offerId)))
+    if (missing.length > 0) {
+      const sample = missing.slice(0, 5).map((m) => m.offerId).join(', ')
+      log(
+        'warn',
+        `Allegro: ${missing.length} z ${manualOffers.length} aukcji z mapowania CSV nie ma na żadnym podłączonym koncie (np. ${sample}). ` +
+          'Sprawdź, czy każde konto Allegro jest autoryzowane na właściwy login.'
+      )
     }
   }
   return agg
+}
+
+/** Jedna linia diagnostyki konta: skąd dopasowania i dlaczego nic nie poszło. */
+function describeStats(label, summary) {
+  const st = summary.stats
+  return (
+    `Allegro „${label}": ofert ${st.offers}, mapowań CSV na tym koncie ${st.manualInAccount}/${st.manualTotal}; ` +
+    `zmienione pozycje — ręcznie ${st.viaManual}, EAN ${st.viaEan}, SKU/kod ${st.viaSku}, nazwa ${st.viaName}, ` +
+    `do weryfikacji ${summary.needsReview}, bez dopasowania ${st.noMatch}; wysłano ${summary.changed}, błędy ${summary.errors}.`
+  )
 }
 
 /** Odczyt dziennika dla zakładki UI. */

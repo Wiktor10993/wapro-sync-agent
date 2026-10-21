@@ -242,6 +242,28 @@ CREATE TABLE IF NOT EXISTS manual_mappings (
 );
 CREATE INDEX IF NOT EXISTS ix_manualmap_sku ON manual_mappings(channel, sku);
 CREATE INDEX IF NOT EXISTS ix_manualmap_ean ON manual_mappings(channel, ean);
+
+-- v6.4: zapamiętane dopasowania oferta → SKU per konto (z wysyłki stanów).
+-- Służą do rozpoznania SKU w zamówieniach Allegro, gdy oferta nie ma sygnatury.
+CREATE TABLE IF NOT EXISTS offer_sku_map (
+  account_id TEXT NOT NULL,
+  offer_id   TEXT NOT NULL,
+  sku        TEXT NOT NULL,
+  via        TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (account_id, offer_id)
+);
+
+-- v6.4: kody z pełnej oferty Allegro (EAN, kod producenta) — cache do automapowania.
+CREATE TABLE IF NOT EXISTS allegro_offer_details (
+  account_id    TEXT NOT NULL,
+  offer_id      TEXT NOT NULL,
+  external_id   TEXT NOT NULL DEFAULT '',
+  ean           TEXT NOT NULL DEFAULT '',
+  producer_code TEXT NOT NULL DEFAULT '',
+  fetched_ms    INTEGER NOT NULL,
+  PRIMARY KEY (account_id, offer_id)
+);
 `
 
 export class LocalDatabase {
@@ -544,6 +566,51 @@ export class LocalDatabase {
   clearManualMappings(channel?: Channel): void {
     if (channel) this.db.prepare('DELETE FROM manual_mappings WHERE channel = ?').run(channel)
     else this.db.prepare('DELETE FROM manual_mappings').run()
+  }
+
+  // --- v6.4: zapamiętane dopasowania oferta → SKU (per konto) -------------
+  saveOfferSkus(accountId: string, pairs: Array<{ offerId: string; sku: string; via?: string }>): void {
+    if (!pairs.length) return
+    const st = this.db.prepare(
+      `INSERT INTO offer_sku_map (account_id, offer_id, sku, via, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(account_id, offer_id) DO UPDATE SET sku = excluded.sku, via = excluded.via, updated_at = excluded.updated_at`
+    )
+    this.db.transaction(() => {
+      for (const p of pairs) if (p.offerId && p.sku) st.run(accountId, String(p.offerId), String(p.sku), p.via ?? '')
+    })()
+  }
+
+  /** Mapa offerId → SKU dla konta: zapamiętane dopasowania + ręczne mapowania Allegro (te wygrywają). */
+  offerSkuMap(accountId: string): Map<string, string> {
+    const out = new Map<string, string>()
+    for (const r of this.db.prepare('SELECT offer_id, sku FROM offer_sku_map WHERE account_id = ?').all(accountId) as any[]) {
+      out.set(String(r.offer_id), String(r.sku))
+    }
+    for (const r of this.db.prepare("SELECT offer_id, sku FROM manual_mappings WHERE channel = 'allegro' AND sku <> ''").all() as any[]) {
+      out.set(String(r.offer_id), String(r.sku))
+    }
+    return out
+  }
+
+  // --- v6.4: cache kodów z pełnej oferty Allegro --------------------------
+  getOfferDetails(accountId: string): Map<string, { externalId: string; ean: string; producerCode: string; fetchedMs: number }> {
+    const out = new Map<string, { externalId: string; ean: string; producerCode: string; fetchedMs: number }>()
+    for (const r of this.db.prepare('SELECT * FROM allegro_offer_details WHERE account_id = ?').all(accountId) as any[]) {
+      out.set(String(r.offer_id), { externalId: r.external_id ?? '', ean: r.ean ?? '', producerCode: r.producer_code ?? '', fetchedMs: r.fetched_ms })
+    }
+    return out
+  }
+
+  saveOfferDetails(accountId: string, offerId: string, d: { externalId?: string; ean?: string; producerCode?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO allegro_offer_details (account_id, offer_id, external_id, ean, producer_code, fetched_ms)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, offer_id) DO UPDATE SET external_id = excluded.external_id, ean = excluded.ean,
+           producer_code = excluded.producer_code, fetched_ms = excluded.fetched_ms`
+      )
+      .run(accountId, String(offerId), d.externalId ?? '', d.ean ?? '', d.producerCode ?? '', Date.now())
   }
 
   // --- dedup przetworzonych zamówień (v6.1: sprzedaż → delta stanu) -------

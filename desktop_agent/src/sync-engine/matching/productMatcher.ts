@@ -36,6 +36,7 @@ interface IndexedOffer {
 
 export interface OfferIndex {
   bySku: Map<string, string | null> // sku -> offerId (null = niejednoznaczne)
+  byNormSku: Map<string, string | null> // sku bez separatorów, małe litery -> offerId
   byEan: Map<string, string | null> // ean -> offerId (null = niejednoznaczne)
   offers: IndexedOffer[]
 }
@@ -44,8 +45,27 @@ export interface OfferIndex {
  * Buduje indeks ofert. Duplikaty EAN/SKU oznaczamy jako NIEJEDNOZNACZNE (null),
  * żeby matcher nie „strzelał" w pierwszą lepszą ofertę.
  */
+/**
+ * Klucz SKU bez separatorów i wielkości liter („00-30-71-30-0125" ≡ „003071300125").
+ * Krótkie klucze (< 5 znaków) pomijamy — za duże ryzyko przypadkowej zgodności.
+ */
+export function normalizeSku(code: string): string {
+  const k = String(code ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  return k.length >= 5 ? k : ''
+}
+
+function offerCodes(offer: OfferCandidate): string[] {
+  const out = new Set<string>()
+  for (const c of [offer.sku, ...(offer.codes ?? [])]) {
+    const v = String(c ?? '').trim()
+    if (v) out.add(v)
+  }
+  return [...out]
+}
+
 export function buildOfferIndex(offers: OfferCandidate[]): OfferIndex {
   const bySku = new Map<string, string | null>()
+  const byNormSku = new Map<string, string | null>()
   const byEan = new Map<string, string | null>()
   const indexed: IndexedOffer[] = []
 
@@ -57,12 +77,15 @@ export function buildOfferIndex(offers: OfferCandidate[]): OfferIndex {
 
   for (const offer of offers) {
     const id = String(offer.offerId)
-    put(bySku, String(offer.sku ?? '').trim(), id)
+    for (const code of offerCodes(offer)) {
+      put(bySku, code, id)
+      put(byNormSku, normalizeSku(code), id)
+    }
     put(byEan, String(offer.ean ?? '').trim(), id)
     indexed.push({ offer, norm: normalizeName(offer.name ?? ''), params: extractParams(offer.name ?? '') })
   }
 
-  return { bySku, byEan, offers: indexed }
+  return { bySku, byNormSku, byEan, offers: indexed }
 }
 
 export interface MatchInput {
@@ -103,6 +126,19 @@ export function matchProduct(
       status: 'NEEDS_REVIEW',
       confidence: 0,
       reason: `SKU ${sku} występuje w kilku ofertach — niejednoznaczne.`,
+      candidateOfferIds: collectByCode(index, 'sku', sku)
+    }
+  }
+
+  // --- Poziom 2b: SKU bez separatorów (np. kod producenta zapisany inaczej) --
+  const normSku = normalizeSku(sku)
+  if (normSku && index.byNormSku?.has(normSku)) {
+    const id = index.byNormSku.get(normSku)
+    if (id) return { status: 'MATCHED', offerId: id, via: 'sku', confidence: 1 }
+    return {
+      status: 'NEEDS_REVIEW',
+      confidence: 0,
+      reason: `SKU ${sku} (bez separatorów) występuje w kilku ofertach — niejednoznaczne.`,
       candidateOfferIds: collectByCode(index, 'sku', sku)
     }
   }
@@ -161,8 +197,12 @@ function paramsSubsetOk(inParams: Set<string>, candParams: Set<string>): boolean
 function collectByCode(index: OfferIndex, field: 'ean' | 'sku', code: string): string[] {
   const out: string[] = []
   for (const { offer } of index.offers) {
-    const v = String((field === 'ean' ? offer.ean : offer.sku) ?? '').trim()
-    if (v === code) out.push(String(offer.offerId))
+    if (field === 'ean') {
+      if (String(offer.ean ?? '').trim() === code) out.push(String(offer.offerId))
+    } else {
+      const norm = normalizeSku(code)
+      if (offerCodes(offer).some((c) => c === code || (norm && normalizeSku(c) === norm))) out.push(String(offer.offerId))
+    }
   }
   return out
 }

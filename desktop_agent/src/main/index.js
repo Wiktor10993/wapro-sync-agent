@@ -671,9 +671,15 @@ if (gotLock) {
       log('error', `Nie udało się uruchomić harmonogramu: ${err.message}`)
     }
 
-    // Auto-update (OTA) — tylko w wersji spakowanej; sprawdza feed po starcie.
+    // Auto-update (OTA) — tylko w wersji spakowanej; sprawdza feed po starcie i co 2 h,
+    // a pobraną łatkę instaluje sam, gdy nie trwa żadna synchronizacja.
     try {
-      await updater.initUpdater({ isDev, onEvent: emitUpdate, log })
+      await updater.initUpdater({
+        isDev,
+        onEvent: emitUpdate,
+        log,
+        busy: () => ['up', 'upAllegro', 'down', 'reflect'].some((k) => isRunning(k))
+      })
     } catch (err) {
       log('warn', `Auto-update: ${err.message}`)
     }

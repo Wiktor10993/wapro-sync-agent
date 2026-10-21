@@ -7,14 +7,16 @@
  * -ilość, a procedura po stronie WAPRO zdejmuje stan z kartoteki).
  *
  * Gwarancje:
- *  - dedup po id zamówienia (SQLite processed_sales) — brak podwójnego zdjęcia,
+ *  - dedup po pozycji zamówienia (SQLite processed_sales) — brak podwójnego zdjęcia,
+ *  - SKU pozycji: mapowanie oferta → indeks (CSV / automapowanie), potem sygnatura,
  *  - zapis wszystkich pozycji zamówienia w JEDNEJ transakcji; „przetworzone"
  *    oznaczamy dopiero po commitcie (gdy coś padnie — ponawiamy w kolejnym cyklu).
  */
 
 import { getPool, sql } from '../wapro/pool.js'
-import { getDbSettings, listAllegroAccountsPublic } from '../store.js'
-import { fetchAllegroOrders } from './allegroAuth.js'
+import { getAllegroSalesSince, getDbSettings, setAllegroSalesSince } from '../store.js'
+import { fetchPaidAllegroOrdersSince, uniqueAllegroAccounts } from './allegroAuth.js'
+import { resolveLineSku } from './allegroSyncCore.js'
 import { getBufferDb } from './bufferDb.js'
 
 const DELTA_TABLE = 'INTEG.WAPRO_DELTA_BUFOR'
@@ -40,48 +42,63 @@ async function ensureDeltaTable(pool, log) {
   }
 }
 
+/** Okno wstecz (dni), z którego co cykl pobieramy opłacone zamówienia. */
+const LOOKBACK_DAYS = 7
+
 /**
- * Pobiera nowe zamówienia Allegro ze WSZYSTKICH autoryzowanych kont i dopisuje
- * korekty stanu do bufora WAPRO. Dedup per konto (source = `allegro:<id>`).
- * @returns {Promise<{fetched:number, applied:number, skipped:number, orders:number}>}
+ * Pobiera nowe zamówienia Allegro ze WSZYSTKICH autoryzowanych kont (bez duplikatów
+ * loginu) i dopisuje korekty stanu do bufora WAPRO. Dedup per pozycja zamówienia
+ * (source = `allegro:<id>`, ref = `<zamówienie>:<pozycja>`).
+ * @returns {Promise<{fetched:number, applied:number, skipped:number, orders:number, unresolved:number}>}
  */
 export async function pullAllegroStockDeltas(log = () => {}) {
-  const accounts = listAllegroAccountsPublic().filter((a) => a.authorized)
-  if (accounts.length === 0) return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
+  const accounts = await uniqueAllegroAccounts(log)
+  const totals = { fetched: 0, applied: 0, skipped: 0, orders: 0, unresolved: 0 }
+  if (accounts.length === 0) return totals
 
   const db = await getBufferDb()
   const pool = await getPool(getDbSettings())
   await ensureDeltaTable(pool, log)
 
-  const totals = { fetched: 0, applied: 0, skipped: 0, orders: 0 }
   for (const a of accounts) {
     const r = await pullForAccount(a, db, pool, log)
-    totals.fetched += r.fetched
-    totals.applied += r.applied
-    totals.skipped += r.skipped
-    totals.orders += r.orders
+    for (const k of Object.keys(totals)) totals[k] += r[k] ?? 0
   }
   return totals
 }
 
 async function pullForAccount(account, db, pool, log) {
+  const empty = { fetched: 0, applied: 0, skipped: 0, orders: 0, unresolved: 0 }
   const source = `allegro:${account.id}`
+
+  // Pierwsze uruchomienie: ustawiamy znacznik „od teraz" — bez zdejmowania wstecz.
+  const since = getAllegroSalesSince(account.id)
+  if (!since) {
+    setAllegroSalesSince(account.id, new Date().toISOString())
+    log('info', `Allegro→WAPRO „${account.label}": start zdejmowania stanów za sprzedaż od teraz (starsze zamówienia pomijam).`)
+    return empty
+  }
+  const windowStart = new Date(Math.max(new Date(since).getTime(), Date.now() - LOOKBACK_DAYS * 86400_000)).toISOString()
+
   let forms
   try {
-    forms = await fetchAllegroOrders(account.id, { limit: 100, status: 'READY_FOR_PROCESSING' }, log)
+    forms = await fetchPaidAllegroOrdersSince(account.id, windowStart, log)
   } catch (err) {
     log('warn', `Allegro→WAPRO (stan) konto „${account.label}": pobranie sprzedaży nieudane: ${err.message}`)
-    return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
+    return empty
   }
-  if (!forms?.length) return { fetched: 0, applied: 0, skipped: 0, orders: 0 }
+  if (!forms?.length) return empty
 
+  const offerSku = db.offerSkuMap(account.id)
   let applied = 0
   let skipped = 0
   let orders = 0
+  let unresolved = 0
 
   for (const f of forms) {
     const ref = String(f?.id ?? '')
     if (!ref) continue
+    // Zgodność wstecz: zamówienie oznaczone w całości (v6.1–6.3) — pomijamy.
     if (db.isSaleProcessed(source, ref)) {
       skipped++
       continue
@@ -89,14 +106,40 @@ async function pullForAccount(account, db, pool, log) {
 
     const lines = []
     for (const li of f?.lineItems ?? []) {
-      const sku = String(li?.offer?.external?.id ?? '').trim()
+      const lineRef = `${ref}:${li?.id ?? li?.offer?.id ?? ''}`
+      if (db.isSaleProcessed(source, lineRef)) {
+        skipped++
+        continue
+      }
       const qty = Math.trunc(Number(li?.quantity) || 0)
-      if (sku && qty > 0) lines.push({ sku, qty })
+      if (qty <= 0) {
+        db.markSaleProcessed(source, lineRef)
+        continue
+      }
+      const sku = resolveLineSku(li, offerSku)
+      if (!sku) {
+        // Bez SKU nie wiemy, co zdjąć. NIE oznaczamy — gdy pojawi się mapowanie
+        // (CSV / automapowanie), pozycja zejdzie w kolejnym cyklu (w oknie LOOKBACK_DAYS).
+        unresolved++
+        try {
+          db.enqueueUnmapped({
+            source: 'allegro',
+            channel: 'allegro',
+            sku: `oferta:${li?.offer?.id ?? '?'}`,
+            ean: '',
+            name: String(li?.offer?.name ?? ''),
+            quantity: qty,
+            reason: `Sprzedaż na koncie „${account.label}" (zamówienie ${ref}) — oferta bez sygnatury i bez mapowania na indeks WAPRO.`,
+            candidates: []
+          })
+        } catch {
+          /* kolejka pomocnicza */
+        }
+        continue
+      }
+      lines.push({ sku, qty, lineRef })
     }
-    if (lines.length === 0) {
-      db.markSaleProcessed(source, ref)
-      continue
-    }
+    if (lines.length === 0) continue
 
     const tx = new sql.Transaction(pool)
     try {
@@ -111,7 +154,7 @@ async function pullForAccount(account, db, pool, log) {
           .query(`INSERT INTO ${DELTA_TABLE} (SKU, EAN, DELTA_QTY, TARGET_QTY, REASON) VALUES (@sku, @ean, @delta, @target, @reason)`)
       }
       await tx.commit()
-      db.markSaleProcessed(source, ref)
+      for (const ln of lines) db.markSaleProcessed(source, ln.lineRef)
       applied += lines.length
       orders++
     } catch (err) {
@@ -123,5 +166,8 @@ async function pullForAccount(account, db, pool, log) {
   if (applied > 0 || orders > 0) {
     log('success', `Allegro→WAPRO „${account.label}": zdjęto stan dla ${applied} pozycji z ${orders} zamówień (pominięto ${skipped}).`)
   }
-  return { fetched: forms.length, applied, skipped, orders }
+  if (unresolved > 0) {
+    log('warn', `Allegro→WAPRO „${account.label}": ${unresolved} pozycji sprzedaży bez indeksu WAPRO (oferta bez sygnatury i mapowania) — czekają na mapowanie (Action Center).`)
+  }
+  return { fetched: forms.length, applied, skipped, orders, unresolved }
 }
