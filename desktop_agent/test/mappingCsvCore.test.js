@@ -135,3 +135,39 @@ describe('wzorzec', () => {
     assert.equal(cleanCell('=00123'), '00123') // ="…" po przejściu przez parser bez cudzysłowów
   })
 })
+
+describe('konta w nagłówkach eksportów', () => {
+  it('konto nazwane samą liczbą dostaje czytelny nagłówek i jest rozpoznawane przy imporcie', async () => {
+    const { accountSlug, allegroColumnHeader, allegroStockHeader } = await import('../src/main/services/mappingCsvCore.js')
+    const acc = { id: 'acc_2', label: '1', accountLogin: '' }
+    assert.equal(accountSlug(acc), 'konto_1')
+    assert.equal(allegroColumnHeader(acc), 'allegro_konto_1_numer_oferty')
+    assert.equal(allegroStockHeader(ACCOUNTS[0]), 'stan_allegro_catfish2017')
+    const cols = classifyColumns(['indeks_wapro', 'allegro_konto_1_numer_oferty', 'stan_allegro_konto_1'], [acc])
+    assert.deepEqual(cols.allegro, [{ header: 'allegro_konto_1_numer_oferty', accountId: 'acc_2' }])
+  })
+
+  it('plik połączony z eksportu da się wgrać jako mapowanie (kolumny stanu pomijane)', () => {
+    const cols = classifyColumns(
+      ['indeks_wapro', 'ean', 'nazwa_wapro', 'stan_wapro', 'allegro_catfish2017_numer_oferty', 'stan_allegro_catfish2017',
+        'allegro_sklep_drugi_numer_oferty', 'stan_allegro_sklep_drugi', 'baselinker_id_produktu', 'stan_baselinker', 'rozjazd'],
+      ACCOUNTS
+    )
+    assert.deepEqual(cols.allegro.map((c) => c.accountId), ['primary', 'acc_x1'])
+    assert.deepEqual(cols.baselinker, ['baselinker_id_produktu'])
+  })
+
+  it('buildAccountOfferFinder: mapowanie oferta → indeks wygrywa z sygnaturą, potem EAN i nazwa', async () => {
+    const { buildAccountOfferFinder } = await import('../src/main/services/mappingCsvCore.js')
+    const offers = [
+      { offerId: '1', sku: 'A-1', ean: '', name: 'Kulki truskawka' },
+      { offerId: '2', sku: '', ean: '590', name: 'Booster' },
+      { offerId: '3', sku: '', ean: '', name: 'Atraktor anyż' }
+    ]
+    const find = buildAccountOfferFinder(offers, new Map([['3', 'A-1']]))
+    assert.equal(find({ sku: 'A-1' }).offerId, '3')
+    assert.equal(find({ sku: 'X', ean: '590' }).offerId, '2')
+    assert.equal(find({ sku: 'Y', name: 'Kulki truskawka' }).offerId, '1')
+    assert.equal(find({ sku: 'Z', name: 'nie ma' }), null)
+  })
+})

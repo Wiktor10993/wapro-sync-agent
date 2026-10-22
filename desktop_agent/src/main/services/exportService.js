@@ -2,8 +2,9 @@
  * exportService.js — eksport stanów magazynowych do CSV (#1).
  *
  * Zrzuca aktualny snapshot z trzech źródeł (WAPRO / Allegro / BaseLinker) do
- * plików CSV oraz jeden plik „połączony" (side-by-side po EAN/SKU), żeby od razu
- * było widać rozjazdy. WAPRO jest źródłem prawdy.
+ * plików CSV oraz jeden plik „połączony" (side-by-side), żeby od razu było widać
+ * rozjazdy. WAPRO jest źródłem prawdy. Allegro: KAŻDE KONTO OSOBNO — osobny plik
+ * i osobne kolumny `allegro_<konto>_numer_oferty` / `stan_allegro_<konto>`.
  *
  * CSV: separator „;" (polski Excel), UTF-8 z BOM (poprawne polskie znaki),
  * pola z „;"/cudzysłowem/nową linią cytowane wg RFC 4180.
@@ -15,6 +16,16 @@ import { fetchStockSnapshot } from '../wapro/inventoryRepository.js'
 import * as allegroSync from './allegroSync.js'
 import * as blApi from './baselinkerApi.js'
 import { getDbSettings, getSchemaMap, getSyncSettings } from '../store.js'
+import { uniqueAllegroAccounts } from './allegroAuth.js'
+import { getBufferDb } from './bufferDb.js'
+import {
+  BASELINKER_HEADER,
+  accountSlug,
+  allegroColumnHeader,
+  allegroStockHeader,
+  buildAccountOfferFinder,
+  excelText
+} from './mappingCsvCore.js'
 
 const BOM = '﻿'
 
@@ -61,17 +72,26 @@ export async function snapshotWapro() {
   }))
 }
 
-export async function snapshotAllegro(log = () => {}) {
-  // Wszystkie autoryzowane konta Allegro razem (kolumna magazyn = etykieta konta).
-  const offers = await allegroSync.listOffersWithStockAll(log)
-  return offers.map((o) => ({
-    id: o.offerId,
-    sku: o.sku ?? '',
-    ean: o.ean ?? '',
-    name: o.name ?? '',
-    quantity: Math.trunc(Number(o.quantity) || 0),
-    warehouse: o.accountLabel ? `allegro:${o.accountLabel}` : 'allegro'
-  }))
+/**
+ * Oferty Allegro OSOBNO dla każdego konta (bez duplikatów loginu) + wyszukiwarka
+ * oferty dla pozycji WAPRO (mapowanie oferta → indeks, sygnatura, EAN, nazwa).
+ * @returns {Promise<Array<{account:object, offers:object[], offerSku:Map<string,string>, find:(w:object)=>object|null}>>}
+ */
+export async function loadAllegroByAccount(log = () => {}) {
+  const db = await getBufferDb()
+  const out = []
+  for (const account of await uniqueAllegroAccounts(log)) {
+    let offers = []
+    try {
+      offers = await allegroSync.listOffersWithStock(account.id, log)
+    } catch (err) {
+      log('warn', `Allegro „${account.label}": pobranie ofert nieudane — konto pominięte w pliku: ${err.message}`)
+      continue
+    }
+    const offerSku = db.offerSkuMap(account.id)
+    out.push({ account, offers, offerSku, find: buildAccountOfferFinder(offers, offerSku, allegroSync.normalizeTitle) })
+  }
+  return out
 }
 
 export async function snapshotBaselinker(log = () => {}) {
@@ -96,6 +116,7 @@ export async function snapshotBaselinker(log = () => {}) {
 }
 
 const COLS = ['zrodlo', 'id_oferty_sku', 'ean', 'nazwa', 'stan', 'magazyn', 'zaktualizowano']
+const ALLEGRO_COLS = ['konto_allegro', 'login_allegro', 'numer_oferty', 'sygnatura', 'indeks_wapro', 'ean', 'nazwa', 'stan', 'status', 'zaktualizowano']
 
 function rowsFor(source, items, now) {
   return items.map((i) => [source, i.id, i.ean, i.name, i.quantity, i.warehouse, now])
@@ -136,12 +157,27 @@ export async function exportStocks({ folder, sources = {}, combined = true } = {
     log('success', `Eksport WAPRO: ${data.wapro.length} pozycji → ${path.basename(file)}`)
   }
   if (want.allegro) {
-    log('info', 'Eksport: pobieram oferty Allegro…')
-    data.allegro = await snapshotAllegro(log)
-    const file = path.join(folder, `export_allegro_${stamp}.csv`)
-    await fs.writeFile(file, toCsv(COLS, rowsFor('Allegro', data.allegro, iso)), 'utf8')
-    written.push({ source: 'Allegro', file, count: data.allegro.length })
-    log('success', `Eksport Allegro: ${data.allegro.length} ofert → ${path.basename(file)}`)
+    log('info', 'Eksport: pobieram oferty Allegro (każde konto osobno)…')
+    data.allegro = await loadAllegroByAccount(log)
+    for (const acc of data.allegro) {
+      const slug = accountSlug(acc.account)
+      const file = path.join(folder, `export_allegro_${slug}_${stamp}.csv`)
+      const rows = acc.offers.map((o) => [
+        acc.account.label,
+        acc.account.accountLogin || '',
+        excelText(o.offerId),
+        o.sku,
+        excelText(acc.offerSku.get(String(o.offerId)) ?? ''),
+        excelText(o.ean),
+        o.name,
+        o.quantity,
+        o.status,
+        iso
+      ])
+      await fs.writeFile(file, toCsv(ALLEGRO_COLS, rows), 'utf8')
+      written.push({ source: `Allegro — ${acc.account.label}`, file, count: rows.length })
+      log('success', `Eksport Allegro „${acc.account.label}": ${rows.length} ofert → ${path.basename(file)}`)
+    }
   }
   if (want.baselinker) {
     log('info', 'Eksport: pobieram produkty BaseLinker…')
@@ -152,25 +188,34 @@ export async function exportStocks({ folder, sources = {}, combined = true } = {
     log('success', `Eksport BaseLinker: ${data.baselinker.length} produktów → ${path.basename(file)}`)
   }
 
-  // Plik połączony: WAPRO obok stanów kanałów po kluczu EAN/SKU.
+  // Plik połączony: WAPRO obok ofert KAŻDEGO konta Allegro i BaseLinkera. Nagłówki
+  // są zgodne z plikiem mapowania — po poprawkach można go wgrać jako mapowanie.
   if (combined && data.wapro) {
-    const idx = { allegro: new Map(), baselinker: new Map() }
-    for (const i of data.allegro ?? []) { const k = joinKey(i); if (k) idx.allegro.set(k, i) }
-    for (const i of data.baselinker ?? []) { const k = joinKey(i); if (k) idx.baselinker.set(k, i) }
-    const headers = ['ean', 'sku', 'nazwa', 'stan_wapro', 'stan_allegro', 'stan_baselinker', 'rozjazd']
+    const blIdx = new Map()
+    for (const i of data.baselinker ?? []) { const k = joinKey(i); if (k) blIdx.set(k, i) }
+    const accs = data.allegro ?? []
+    const headers = [
+      'indeks_wapro', 'ean', 'nazwa_wapro', 'stan_wapro',
+      ...accs.flatMap((a) => [allegroColumnHeader(a.account), allegroStockHeader(a.account)]),
+      BASELINKER_HEADER, 'stan_baselinker', 'rozjazd'
+    ]
     const rows = data.wapro.map((w) => {
       const k = joinKey(w)
-      const a = k ? idx.allegro.get(k) : null
-      const b = k ? idx.baselinker.get(k) : null
-      const aq = a ? a.quantity : ''
-      const bq = b ? b.quantity : ''
-      const diff = (a && a.quantity !== w.quantity) || (b && b.quantity !== w.quantity) ? 'TAK' : ''
-      return [w.ean, w.sku, w.name, w.quantity, aq, bq, diff]
+      const b = k ? blIdx.get(k) : null
+      const cells = []
+      const diffs = []
+      for (const a of accs) {
+        const o = a.find(w)
+        cells.push(excelText(o?.offerId ?? ''), o ? o.quantity : '')
+        if (o && Number(o.quantity) !== Number(w.quantity)) diffs.push(accountSlug(a.account))
+      }
+      if (b && Number(b.quantity) !== Number(w.quantity)) diffs.push('baselinker')
+      return [excelText(w.sku), excelText(w.ean), w.name, w.quantity, ...cells, excelText(b?.id ?? ''), b ? b.quantity : '', diffs.join(', ')]
     })
     const file = path.join(folder, `export_polaczony_${stamp}.csv`)
     await fs.writeFile(file, toCsv(headers, rows), 'utf8')
     written.push({ source: 'Połączony', file, count: rows.length })
-    log('success', `Eksport połączony: ${rows.length} wierszy → ${path.basename(file)}`)
+    log('success', `Eksport połączony: ${rows.length} wierszy, kolumny Allegro: ${accs.map((a) => accountSlug(a.account)).join(', ') || 'brak'} → ${path.basename(file)}`)
   }
 
   return { folder, files: written }
