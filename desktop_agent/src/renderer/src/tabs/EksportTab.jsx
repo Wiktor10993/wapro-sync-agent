@@ -21,7 +21,11 @@ export default function EksportTab({ busy, run }) {
     <div className="tab-narzedzia">
       <section className="card">
         <h2>Eksport stanów do CSV</h2>
-        <p className="muted">Zrzut aktualnych stanów z wybranych źródeł (Excel, separator „;", UTF-8).</p>
+        <p className="muted">
+          Zrzut aktualnych stanów z wybranych źródeł (Excel, separator „;", UTF-8). Allegro: osobny plik dla każdego konta.
+          Plik połączony ma kolumny <code>allegro_&lt;konto&gt;_numer_oferty</code> i <code>stan_allegro_&lt;konto&gt;</code> dla każdego
+          konta oraz <code>baselinker_id_produktu</code> — po poprawkach można go wgrać w zakładce Mapowanie.
+        </p>
         <div className="field-row">
           <label><input type="checkbox" checked={src.wapro} onChange={(e) => setSrc((s) => ({ ...s, wapro: e.target.checked }))} /> WAPRO</label>
           <label><input type="checkbox" checked={src.allegro} onChange={(e) => setSrc((s) => ({ ...s, allegro: e.target.checked }))} /> Allegro</label>
@@ -36,7 +40,7 @@ export default function EksportTab({ busy, run }) {
         {result && (
           <ul className="result-list">
             {result.files.map((f) => (
-              <li key={f.file}>{f.source}: <strong>{f.count}</strong> poz. — <code>{f.file.split('/').pop()}</code></li>
+              <li key={f.file}>{f.source}: <strong>{f.count}</strong> poz. — <code>{f.file.split(/[\\/]/).pop()}</code></li>
             ))}
           </ul>
         )}

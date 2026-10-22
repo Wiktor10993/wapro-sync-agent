@@ -24,9 +24,21 @@ import {
   templateInstructions
 } from './mappingCsvCore.js'
 
-/** Konta Allegro do kolumn wzorca/importu (wszystkie skonfigurowane, równorzędnie). */
+/**
+ * Konta Allegro do kolumn wzorca/importu (wszystkie skonfigurowane, równorzędnie).
+ * Wpis z tym samym loginem co wcześniejszy pomijamy — to samo konto nie może mieć
+ * dwóch kolumn (sync i tak go pomija).
+ */
 function allegroAccounts() {
-  return listAllegroAccountsPublic().map((a) => ({ id: a.id, label: a.label, accountLogin: a.accountLogin }))
+  const seen = new Set()
+  const out = []
+  for (const a of listAllegroAccountsPublic()) {
+    const login = String(a.accountLogin || '').toLowerCase()
+    if (login && a.authorized && seen.has(login)) continue
+    if (login && a.authorized) seen.add(login)
+    out.push({ id: a.id, label: a.label, accountLogin: a.accountLogin })
+  }
+  return out
 }
 
 /**

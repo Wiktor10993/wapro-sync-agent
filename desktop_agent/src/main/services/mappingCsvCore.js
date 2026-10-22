@@ -26,7 +26,49 @@ export function normalizeHeader(h) {
 
 /** Krótki identyfikator konta do nagłówka kolumny (login albo nazwa konta). */
 export function accountSlug(account) {
-  return normalizeHeader(account?.accountLogin || account?.label || account?.id || 'konto')
+  const k = normalizeHeader(account?.accountLogin || account?.label || account?.id || 'konto')
+  // Sama liczba (np. konto nazwane „1") nic nie mówi w nagłówku → „konto_1".
+  return /^\d+$/.test(k) ? `konto_${k}` : k
+}
+
+/** Nagłówek kolumny stanu oferty na koncie Allegro (eksporty i raporty). */
+export function allegroStockHeader(account) {
+  return `stan_allegro_${accountSlug(account)}`
+}
+
+/**
+ * Indeks ofert JEDNEGO konta Allegro do łączenia z pozycjami WAPRO w eksportach
+ * i raportach: najpierw mapowanie oferta → indeks (CSV / automapowanie), potem
+ * sygnatura, EAN i (unikalna) nazwa.
+ * @param {Array<{offerId:string, sku?:string, ean?:string, name?:string}>} offers
+ * @param {Map<string,string>} offerSku offerId → indeks WAPRO
+ * @param {(s:string)=>string} normalizeName
+ * @returns {(w:{sku:string, ean?:string, name?:string}) => object|null}
+ */
+export function buildAccountOfferFinder(offers, offerSku = new Map(), normalizeName = (s) => String(s ?? '').toLowerCase()) {
+  const bySku = new Map()
+  const byEan = new Map()
+  const byName = new Map()
+  for (const o of offers) {
+    const mapped = offerSku.get(String(o.offerId))
+    if (mapped) bySku.set(String(mapped).trim().toLowerCase(), o) // mapowanie wygrywa
+  }
+  for (const o of offers) {
+    const ext = String(o.sku ?? '').trim().toLowerCase()
+    if (ext && !bySku.has(ext)) bySku.set(ext, o)
+    const ean = String(o.ean ?? '').trim()
+    if (ean && !byEan.has(ean)) byEan.set(ean, o)
+    const n = normalizeName(o.name ?? '')
+    if (n) byName.set(n, byName.has(n) ? null : o)
+  }
+  return (w) => {
+    const sku = String(w?.sku ?? '').trim().toLowerCase()
+    if (sku && bySku.has(sku)) return bySku.get(sku)
+    const ean = String(w?.ean ?? '').trim()
+    if (ean && byEan.has(ean)) return byEan.get(ean)
+    const n = normalizeName(w?.name ?? '')
+    return (n && byName.get(n)) || null
+  }
 }
 
 /** Nagłówek kolumny numeru oferty dla konta Allegro. */
