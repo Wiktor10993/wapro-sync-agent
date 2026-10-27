@@ -76,6 +76,11 @@ body {
 }
 .app__header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
 .app__subtitle { margin: 3px 0 0; color: var(--text-faint); font-size: 12.5px; }
+.app__version {
+  margin-left: 8px; padding: 1px 7px; border-radius: 999px; vertical-align: 2px;
+  font-size: 12px; font-weight: 500; color: var(--text-dim); border: 1px solid var(--border-soft);
+}
+.app__header-actions { display: flex; align-items: center; gap: 10px; }
 
 .tabs {
   display: flex; gap: 4px; padding: 0 26px;

@@ -74,11 +74,32 @@ export default function App() {
   const [banner, setBanner] = useState(null)
   const [busy, setBusy] = useState(null)
   const [syncSummary, setSyncSummary] = useState(null)
+  const [version, setVersion] = useState('')
 
   const notify = useCallback((type, text) => {
     setBanner({ type, text })
     if (type === 'success') setTimeout(() => setBanner(null), 4000)
   }, [])
+
+  // Numer wersji w nagłówku (i w nazwie okna — ustawia proces główny).
+  useEffect(() => {
+    window.agent.getVersion().then((r) => {
+      if (r?.ok && r.data?.app) setVersion(r.data.app)
+    })
+  }, [])
+
+  const checkUpdates = useCallback(async () => {
+    setBusy('update-check')
+    try {
+      const r = await window.agent.updateCheck()
+      const d = r?.ok ? r.data : null
+      if (!d || !d.ok) notify('error', `Sprawdzenie aktualizacji nie powiodło się: ${d?.error ?? r?.error ?? 'nieznany błąd'}`)
+      else if (d.available) notify('success', `Dostępna wersja ${d.latest} — pobieram w tle, zainstaluje się sama (albo kliknij „Zainstaluj" w powiadomieniu).`)
+      else notify('success', `Masz najnowszą wersję (${d.current}).`)
+    } finally {
+      setBusy(null)
+    }
+  }, [notify])
 
   const refreshSettings = useCallback(async () => {
     const res = await window.agent.getSettings()
@@ -142,10 +163,17 @@ export default function App() {
     <div className="app app--sidebar">
       <header className="app__header">
         <div>
-          <h1>Wapro ⇄ Allegro / BaseLinker</h1>
-          <p className="app__subtitle">Agent lokalny — Wapro Mag jest źródłem prawdy dla stanów</p>
+          <h1>
+            Wapro Sync Agent{version && <span className="app__version">{version}</span>}
+          </h1>
+          <p className="app__subtitle">Wapro ⇄ Allegro / BaseLinker — Wapro Mag jest źródłem prawdy dla stanów</p>
         </div>
-        <StatusPill running={status.schedulerRunning} />
+        <div className="app__header-actions">
+          <button type="button" className="btn btn--small" onClick={checkUpdates} disabled={busy === 'update-check'}>
+            {busy === 'update-check' ? 'Sprawdzam…' : 'Sprawdź aktualizacje'}
+          </button>
+          <StatusPill running={status.schedulerRunning} />
+        </div>
       </header>
 
       {banner && (

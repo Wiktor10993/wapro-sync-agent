@@ -163,7 +163,8 @@ function createWindow(startHidden = false) {
     minHeight: 640,
     show: false,
     autoHideMenuBar: true,
-    title: 'Wapro ⇄ Allegro / BaseLinker — Agent',
+    // Numer wersji w nazwie okna (pasek zadań, Alt+Tab) — od razu widać, co jest zainstalowane.
+    title: `Wapro Sync Agent ${app.getVersion()}`,
     // Bez tego przy ciemnym motywie mignie białe okno zanim wczyta się CSS.
     backgroundColor: '#0f141a',
     webPreferences: {
@@ -174,7 +175,9 @@ function createWindow(startHidden = false) {
       nodeIntegration: false,
       webSecurity: true
     }
-  })
+  })  // <title> z index.html nie nadpisuje nazwy z numerem wersji.
+  mainWindow.on('page-title-updated', (e) => e.preventDefault())
+
 
   mainWindow.on('ready-to-show', () => {
     // W trybie dev pokazujemy zawsze (ignorujemy ewentualny zapisany „startMinimized").
@@ -529,7 +532,7 @@ function registerIpc() {
   handle(CH.ANALYTICS_RECENT_ENDED, async () => restockStore.listRestock())
 
   // --- aktualizacje (OTA) ------------------------------------------------
-  handle(CH.UPDATE_CHECK, async () => updater.checkForUpdates())
+  handle(CH.UPDATE_CHECK, async () => updater.checkForUpdates(app.getVersion()))
   handle(CH.UPDATE_INSTALL, async () => {
     updater.quitAndInstall()
     return { ok: true }
