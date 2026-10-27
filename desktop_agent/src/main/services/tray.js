@@ -53,7 +53,7 @@ export function createTray(handlers) {
   if (tray) return tray
 
   tray = new Tray(buildIcon(false))
-  tray.setToolTip('Wapro Sync Agent')
+  tray.setToolTip(`Wapro Sync Agent ${app.getVersion()}`)
 
   tray.on('double-click', () => handlers.onShow())
 
@@ -70,14 +70,15 @@ export function updateTrayMenu(state, handlers) {
   tray.setImage(buildIcon(running))
   tray.setToolTip(
     running
-      ? `Wapro Sync Agent — synchronizacja aktywna${
+      ? `Wapro Sync Agent ${app.getVersion()} — synchronizacja aktywna${
           state.lastSyncUpAt ? `\nOstatnie stany: ${new Date(state.lastSyncUpAt).toLocaleString('pl-PL')}` : ''
         }`
-      : 'Wapro Sync Agent — zatrzymany'
+      : `Wapro Sync Agent ${app.getVersion()} — zatrzymany`
   )
 
   tray.setContextMenu(
     Menu.buildFromTemplate([
+      { label: `Wapro Sync Agent ${app.getVersion()}`, enabled: false },
       { label: running ? '● Synchronizacja aktywna' : '○ Synchronizacja zatrzymana', enabled: false },
       { type: 'separator' },
       { label: 'Otwórz okno', click: () => handlers.onShow() },
@@ -91,7 +92,6 @@ export function updateTrayMenu(state, handlers) {
       },
       { label: 'Otwórz folder z logami', click: () => shell.openPath(getLogDirectory()) },
       { type: 'separator' },
-      { label: `Wersja ${app.getVersion()}`, enabled: false },
       { label: 'Zakończ', click: () => handlers.onQuit() }
     ])
   )

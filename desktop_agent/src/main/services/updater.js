@@ -65,14 +65,20 @@ export async function initUpdater({ isDev, onEvent, log, busy } = {}) {
   }
 }
 
-/** Ręczne sprawdzenie (przycisk w UI). */
-export async function checkForUpdates() {
+/**
+ * Ręczne sprawdzenie (przycisk w UI). Gdy jest nowsza wersja, pobieranie rusza
+ * w tle (autoDownload), a dalej jak przy sprawdzeniu automatycznym.
+ * @returns {{ok:boolean, current:string, latest?:string|null, available?:boolean, error?:string}}
+ */
+export async function checkForUpdates(current = '') {
   try {
     const up = await load()
     const r = await up.checkForUpdates()
-    return { ok: true, version: r?.updateInfo?.version ?? null }
+    const latest = r?.updateInfo?.version ?? null
+    const available = typeof r?.isUpdateAvailable === 'boolean' ? r.isUpdateAvailable : Boolean(latest && latest !== current)
+    return { ok: true, current, latest, available }
   } catch (e) {
-    return { ok: false, error: String(e?.message ?? e) }
+    return { ok: false, current, error: String(e?.message ?? e).split('\n')[0] }
   }
 }
 
