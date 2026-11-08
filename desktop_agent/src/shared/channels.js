@@ -66,6 +66,12 @@ export const CH = {
   AC_RETRY_ERROR: 'ac:retry-error',
   AC_IGNORE_ERROR: 'ac:ignore-error',
 
+  // --- Ignorowane pozycje (v6.8) ------------------------------------------
+  IGNORED_LIST: 'ignored:list',
+  IGNORED_ADD: 'ignored:add',
+  IGNORED_REMOVE: 'ignored:remove',
+  IGNORED_PICK_LIST: 'ignored:pick-list',
+
   // --- eksport / raporty / mapowanie (v5) ---------------------------------
   EXPORT_STOCKS: 'export:stocks',
   REPORT_DEADSTOCK: 'report:deadstock',

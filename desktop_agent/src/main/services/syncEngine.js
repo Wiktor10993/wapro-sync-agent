@@ -38,6 +38,30 @@ const loopGuard = new LoopGuard()
 const syncLog = new SyncLog(() => getPool(getDbSettings()))
 let auditReady = false
 
+// Pamięć dopasowań per kanał/konto (klucz = guardKey adaptera) — patrz MatchCache.
+const matchCaches = new Map()
+function matchCacheFor(key) {
+  let c = matchCaches.get(key)
+  if (!c) {
+    c = { fingerprint: undefined, results: new Map() }
+    matchCaches.set(key, c)
+  }
+  return c
+}
+
+/** Filtr listy „Ignorowane" dla kanału (wczytany raz na przebieg). */
+async function loadIgnoredFilter(channel, log) {
+  try {
+    const db = await getBufferDb()
+    const skus = db.ignoredSkus(channel)
+    if (skus.size === 0) return undefined
+    return (row) => skus.has(String(row.sku ?? ''))
+  } catch (err) {
+    log('warn', `Lista „Ignorowane" niedostępna (${channel}): ${err.message}`)
+    return undefined
+  }
+}
+
 /** Zakłada schemat dziennika (raz). Wywoływane też przy starcie z index.js. */
 export async function ensureAuditSchema() {
   if (auditReady) return
@@ -197,6 +221,7 @@ async function loadManualOffers(channel, log) {
 export async function runBaselinkerSync(log = () => {}) {
   await ensureAuditSchema()
   const manualOffers = await loadManualOffers('baselinker', log)
+  const isIgnored = await loadIgnoredFilter('baselinker', log)
   const summary = await runInventorySync(
     baselinkerAdapter(log),
     {
@@ -206,14 +231,14 @@ export async function runBaselinkerSync(log = () => {}) {
       writeLog: (entries) => syncLog.insertMany(entries),
       loopGuard
     },
-    { matcher: {}, batch: batchFromSettings(), manualOffers }
+    { matcher: {}, batch: batchFromSettings(), manualOffers, isIgnored, matchCache: matchCacheFor('baselinker') }
   )
   if (summary.stats) {
     const st = summary.stats
     log(
       'info',
       `BaseLinker: produktów w katalogu ${st.offers}, mapowań CSV ${st.manualInAccount}/${st.manualTotal}; zmienione pozycje — ` +
-        `ręcznie ${st.viaManual}, EAN ${st.viaEan}, SKU ${st.viaSku}, nazwa ${st.viaName}, bez dopasowania ${st.noMatch}.`
+        `ręcznie ${st.viaManual}, EAN ${st.viaEan}, SKU ${st.viaSku}, nazwa ${st.viaName}, bez dopasowania ${st.noMatch}, ignorowane ${st.ignored ?? 0}.`
     )
   }
   return summary
@@ -234,7 +259,14 @@ export async function runAllegroSync(log = () => {}) {
   }
 
   const manualOffers = await loadManualOffers('allegro', log)
+  const isIgnored = await loadIgnoredFilter('allegro', log)
   const db = await getBufferDb()
+  // Jeden odczyt WAPRO na cały przebieg — wcześniej osobny dla każdego konta.
+  let snapshotPromise = null
+  const loadSnapshotOnce = () => {
+    if (!snapshotPromise) snapshotPromise = loadSnapshot()
+    return snapshotPromise
+  }
   const agg = { checked: 0, changed: 0, needsReview: 0, errors: 0, accounts: accounts.length }
   const seenOfferIds = new Set()
   let fetchedAll = true
@@ -245,7 +277,7 @@ export async function runAllegroSync(log = () => {}) {
       const summary = await runInventorySync(
         adapter,
         {
-          loadSnapshot,
+          loadSnapshot: loadSnapshotOnce,
           loadHashes: async () => getAllegroStockHashes(a.id),
           saveHashes: async (h) => setAllegroStockHashes(a.id, h),
           writeLog: (entries) => syncLog.insertMany(entries),
@@ -255,6 +287,8 @@ export async function runAllegroSync(log = () => {}) {
           matcher: {},
           batch: batchFromSettings(),
           manualOffers,
+          isIgnored,
+          matchCache: matchCacheFor(adapter.guardKey),
           // Zapamiętujemy oferta → SKU: zamówienia z ofert bez sygnatury też zdejmą stan WAPRO.
           onMatched: (pairs) => db.saveOfferSkus(a.id, pairs)
         }
@@ -294,7 +328,7 @@ function describeStats(label, summary) {
   return (
     `Allegro „${label}": ofert ${st.offers}, mapowań CSV na tym koncie ${st.manualInAccount}/${st.manualTotal}; ` +
     `zmienione pozycje — ręcznie ${st.viaManual}, EAN ${st.viaEan}, SKU/kod ${st.viaSku}, nazwa ${st.viaName}, ` +
-    `do weryfikacji ${summary.needsReview}, bez dopasowania ${st.noMatch}; wysłano ${summary.changed}, błędy ${summary.errors}.`
+    `do weryfikacji ${summary.needsReview}, bez dopasowania ${st.noMatch}, ignorowane ${st.ignored ?? 0}; wysłano ${summary.changed}, błędy ${summary.errors}.`
   )
 }
 

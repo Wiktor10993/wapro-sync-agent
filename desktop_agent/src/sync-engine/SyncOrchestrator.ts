@@ -196,6 +196,8 @@ export class SyncOrchestrator {
   // =========================================================================
 
   private async pushToChannel(channel: Channel, product: LocalProduct, quantity: number): Promise<void> {
+    // Towar z listy „Ignorowane" — nie mapujemy, nie wysyłamy, nie kolejkujemy.
+    if (this.db.isIgnored(product.sku, channel)) return
     const mapping = await this.resolveMappingOrQueue(channel, product)
     if (!mapping) return // trafiło do „Niezmapowane produkty"
 
@@ -299,8 +301,22 @@ export class SyncOrchestrator {
     this.log('success', `Zmapowano ręcznie ${input.sku} ↔ ${input.channel}:${input.offerId}.`)
   }
 
-  ignoreUnmapped(id: number): void {
-    this.db.setUnmappedStatus(id, 'ignored')
+  /**
+   * „Ignoruj" w Action Center: zamyka wpis i dopisuje towar do listy
+   * „Ignorowane" (dla kanału wpisu), żeby nie wracał przy kolejnym skanie.
+   * Zwraca liczbę zamkniętych wpisów.
+   */
+  ignoreUnmapped(ids: number | number[]): number {
+    const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter((n) => Number.isFinite(n))
+    const items = list.map((id) => this.db.getUnmapped(id)).filter((it): it is NonNullable<typeof it> => !!it)
+    this.db.addIgnored(
+      items
+        .filter((it) => it.sku)
+        .map((it) => ({ sku: it.sku, channel: it.channel ?? '*', ean: it.ean, name: it.name, note: 'Zignorowano w „Problemy"' }))
+    )
+    // Wpisy bez SKU (np. sprzedaż nieznanej oferty) — tylko zamykamy.
+    for (const it of items) if (it.status === 'open') this.db.setUnmappedStatus(it.id, 'ignored')
+    return items.length
   }
 
   /** Ponów wysyłkę delty z kolejki błędów. */

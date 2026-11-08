@@ -88,9 +88,16 @@ const api = {
   acListUnmapped: () => invoke(CH.AC_LIST_UNMAPPED),
   acListErrors: () => invoke(CH.AC_LIST_ERRORS),
   acResolveMapping: (input) => invoke(CH.AC_RESOLVE_MAPPING, input),
+  /** `id` może być tablicą — „Ignoruj zaznaczone" jednym wywołaniem. */
   acIgnoreUnmapped: (id) => invoke(CH.AC_IGNORE_UNMAPPED, { id }),
   acRetryError: (id) => invoke(CH.AC_RETRY_ERROR, { id }),
   acIgnoreError: (id) => invoke(CH.AC_IGNORE_ERROR, { id }),
+
+  // --- Ignorowane pozycje -------------------------------------------------
+  ignoredList: () => invoke(CH.IGNORED_LIST),
+  ignoredAdd: (items) => invoke(CH.IGNORED_ADD, { items }),
+  ignoredRemove: (items) => invoke(CH.IGNORED_REMOVE, { items }),
+  ignoredPickList: () => invoke(CH.IGNORED_PICK_LIST),
 
   // --- eksport / raporty / mapowanie (v5) ---------------------------------
   pickExportFolder: () => invoke(CH.APP_PICK_EXPORT_FOLDER),

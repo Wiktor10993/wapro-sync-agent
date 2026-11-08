@@ -11,7 +11,7 @@
  */
 
 import type { OfferCandidate, MatchResult } from '../types'
-import { normalizeName, nameSimilarity, paramsMatch, extractParams } from './normalize'
+import { normalizeName, extractParams, tokensOfNorm, similarityOfNorm, JACCARD_WEIGHT, LEVENSHTEIN_WEIGHT } from './normalize'
 
 export interface MatcherOptions {
   /** Minimalne podobieństwo nazwy, by w ogóle rozważyć dopasowanie (0..1). */
@@ -31,6 +31,7 @@ export const DEFAULT_MATCHER_OPTIONS: MatcherOptions = {
 interface IndexedOffer {
   offer: OfferCandidate
   norm: string
+  tokens: Set<string>
   params: Set<string>
 }
 
@@ -39,6 +40,8 @@ export interface OfferIndex {
   byNormSku: Map<string, string | null> // sku bez separatorów, małe litery -> offerId
   byEan: Map<string, string | null> // ean -> offerId (null = niejednoznaczne)
   offers: IndexedOffer[]
+  /** token nazwy -> indeksy ofert, które go zawierają (zawężenie dopasowania po nazwie). */
+  byToken?: Map<string, number[]>
 }
 
 /**
@@ -68,6 +71,7 @@ export function buildOfferIndex(offers: OfferCandidate[]): OfferIndex {
   const byNormSku = new Map<string, string | null>()
   const byEan = new Map<string, string | null>()
   const indexed: IndexedOffer[] = []
+  const byToken = new Map<string, number[]>()
 
   const put = (map: Map<string, string | null>, key: string, id: string) => {
     if (!key) return
@@ -82,10 +86,18 @@ export function buildOfferIndex(offers: OfferCandidate[]): OfferIndex {
       put(byNormSku, normalizeSku(code), id)
     }
     put(byEan, String(offer.ean ?? '').trim(), id)
-    indexed.push({ offer, norm: normalizeName(offer.name ?? ''), params: extractParams(offer.name ?? '') })
+    const norm = normalizeName(offer.name ?? '')
+    const tokens = tokensOfNorm(norm)
+    const pos = indexed.length
+    for (const t of tokens) {
+      const list = byToken.get(t)
+      if (list) list.push(pos)
+      else byToken.set(t, [pos])
+    }
+    indexed.push({ offer, norm, tokens, params: extractParams(offer.name ?? '') })
   }
 
-  return { bySku, byNormSku, byEan, offers: indexed }
+  return { bySku, byNormSku, byEan, offers: indexed, byToken }
 }
 
 export interface MatchInput {
@@ -151,13 +163,16 @@ export function matchProduct(
 
   let best: { id: string; score: number } | null = null
   let second = 0
-  const inParams = extractParams(name)
+  const prepared = prepareName(name)
+  // Poniżej tej wartości kandydat nie zmieni wyniku: nie przekroczy progu ani
+  // nie zbliży się do najlepszego na mniej niż margines.
+  const minScore = opts.nameThreshold - opts.nameMargin
 
-  for (const cand of index.offers) {
-    if (opts.requireParamMatch && !paramsSubsetOk(inParams, cand.params)) continue
-    if (opts.requireParamMatch && !paramsMatch(name, cand.offer.name ?? '')) continue
+  for (const cand of nameCandidates(index, prepared.tokens, minScore)) {
+    // Parametry (2kg, 14g) muszą być identyczne po obu stronach.
+    if (opts.requireParamMatch && !sameParams(prepared.params, cand.params)) continue
 
-    const score = nameSimilarity(name, cand.offer.name ?? '')
+    const score = similarityOfNorm(prepared.norm, prepared.tokens, cand.norm, cand.tokens, minScore)
     if (!best || score > best.score) {
       second = best ? best.score : second
       best = { id: cand.offer.offerId, score }
@@ -187,11 +202,37 @@ export function matchProduct(
   return { status: 'MATCHED', offerId: best.id, via: 'name', confidence: best.score }
 }
 
-/** Czy parametry Wapro są podzbiorem parametrów kandydata (kandydat może mieć więcej). */
-function paramsSubsetOk(inParams: Set<string>, candParams: Set<string>): boolean {
-  if (inParams.size === 0) return true
-  for (const p of inParams) if (!candParams.has(p)) return false
+/** Nazwa pozycji Wapro przygotowana raz na całe dopasowanie. */
+function prepareName(name: string): { norm: string; tokens: Set<string>; params: Set<string> } {
+  const norm = normalizeName(name)
+  return { norm, tokens: tokensOfNorm(norm), params: extractParams(name) }
+}
+
+/** Zbiory parametrów równe (to samo, co wcześniej podzbiór + `paramsMatch`). */
+function sameParams(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const p of a) if (!b.has(p)) return false
   return true
+}
+
+/**
+ * Kandydaci do porównania nazw. Oferta bez żadnego wspólnego tokenu ma Jaccard 0,
+ * więc jej wynik ≤ waga Levenshteina — gdy to mniej niż `minScore`, nie wpływa na
+ * decyzję i można ją pominąć. Zamiast porównywać z każdą ofertą (N×M), bierzemy
+ * tylko oferty ze wspólnym tokenem z indeksu odwróconego.
+ */
+function nameCandidates(index: OfferIndex, tokens: Set<string>, minScore: number): IndexedOffer[] {
+  if (!index.byToken || tokens.size === 0 || minScore <= LEVENSHTEIN_WEIGHT) return index.offers
+  const shared = new Map<number, number>()
+  for (const t of tokens) for (const pos of index.byToken.get(t) ?? []) shared.set(pos, (shared.get(pos) ?? 0) + 1)
+  // Jaccard znamy już z liczby wspólnych tokenów — odrzucamy tych, którzy nawet
+  // z idealnym Levenshteinem nie dojdą do `minScore`.
+  const out: number[] = []
+  for (const [pos, common] of shared) {
+    const jac = common / (tokens.size + index.offers[pos].tokens.size - common)
+    if (JACCARD_WEIGHT * jac + LEVENSHTEIN_WEIGHT >= minScore) out.push(pos)
+  }
+  return out.sort((a, b) => a - b).map((pos) => index.offers[pos])
 }
 
 function collectByCode(index: OfferIndex, field: 'ean' | 'sku', code: string): string[] {
@@ -208,9 +249,11 @@ function collectByCode(index: OfferIndex, field: 'ean' | 'sku', code: string): s
 }
 
 function topNameCandidates(index: OfferIndex, name: string, opts: MatcherOptions, limit: number): string[] {
-  return index.offers
-    .map((c) => ({ id: c.offer.offerId, score: nameSimilarity(name, c.offer.name ?? '') }))
-    .filter((c) => c.score >= opts.nameThreshold - opts.nameMargin)
+  const input = prepareName(name)
+  const minScore = opts.nameThreshold - opts.nameMargin
+  return nameCandidates(index, input.tokens, minScore)
+    .map((c) => ({ id: c.offer.offerId, score: similarityOfNorm(input.norm, input.tokens, c.norm, c.tokens, minScore) }))
+    .filter((c) => c.score >= minScore)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((c) => c.id)

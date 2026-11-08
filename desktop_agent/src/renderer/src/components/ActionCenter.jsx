@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 /**
  * Centrum Dowodzenia „Problemy / Wymaga uwagi" (renderer-local JSX).
  * Trzy podzakładki: niezmapowane produkty, błędy synchronizacji (krytyczne)
  * oraz „0 na stanie (Archiwum)". Bez importów z sync-engine — dostaje `api`.
+ *
+ * v6.8: akcje (Ignoruj/Połącz/Ukryj) usuwają wpis lokalnie zamiast przeładowywać
+ * całą listę, a listy są stronicowane — przy tysiącach pozycji każde kliknięcie
+ * wczytywało i rysowało wszystko od nowa, co zawieszało okno.
  */
+
+/** Ile kart/wierszy rysujemy naraz (reszta po „Pokaż kolejne"). */
+const PAGE = 50
 function Spinner({ lg }) {
   return <span className={`spinner ${lg ? 'spinner--lg' : ''}`} aria-hidden="true" />
 }
@@ -16,8 +23,9 @@ export default function ActionCenter({ api }) {
   const [loading, setLoading] = useState(true)
   const [banner, setBanner] = useState(null)
 
-  const reload = useCallback(async () => {
-    setLoading(true)
+  // `soft` — odświeżenie bez zasłaniania listy spinnerem (np. po Retry).
+  const reload = useCallback(async ({ soft = false } = {}) => {
+    if (!soft) setLoading(true)
     try {
       const [u, e] = await Promise.all([api.listUnmapped(), api.listErrors()])
       setUnmapped(u)
@@ -33,15 +41,25 @@ export default function ActionCenter({ api }) {
     reload()
   }, [reload])
 
-  const critical = errors.filter((e) => e.category !== 'archived_zero')
-  const archived = errors.filter((e) => e.category === 'archived_zero')
+  const critical = useMemo(() => errors.filter((e) => e.category !== 'archived_zero'), [errors])
+  const archived = useMemo(() => errors.filter((e) => e.category === 'archived_zero'), [errors])
+
+  // Natychmiastowe usunięcie z widoku — bez ponownego czytania całej kolejki.
+  const dropUnmapped = useCallback((ids) => {
+    const set = new Set(ids)
+    setUnmapped((list) => list.filter((it) => !set.has(it.id)))
+  }, [])
+  const dropErrors = useCallback((ids) => {
+    const set = new Set(ids)
+    setErrors((list) => list.filter((it) => !set.has(it.id)))
+  }, [])
 
   return (
     <div className="grid">
       <section className="card card--wide">
         <div className="card__header">
           <h2>Problemy / Wymaga uwagi</h2>
-          <button type="button" className="btn btn--tiny" onClick={reload} disabled={loading}>
+          <button type="button" className="btn btn--tiny" onClick={() => reload()} disabled={loading}>
             {loading ? <><Spinner /> Odświeżam…</> : 'Odśwież'}
           </button>
         </div>
@@ -57,11 +75,11 @@ export default function ActionCenter({ api }) {
         {loading ? (
           <div className="ac-loading"><Spinner lg /> Wczytuję…</div>
         ) : tab === 'unmapped' ? (
-          <UnmappedPanel items={unmapped} api={api} onDone={reload} onNotify={setBanner} />
+          <UnmappedPanel items={unmapped} api={api} onRemoved={dropUnmapped} onNotify={setBanner} />
         ) : tab === 'errors' ? (
-          <ErrorsPanel items={critical} api={api} onDone={reload} onNotify={setBanner} />
+          <ErrorsPanel items={critical} api={api} onDone={() => reload({ soft: true })} onRemoved={dropErrors} onNotify={setBanner} />
         ) : (
-          <ArchivedPanel items={archived} api={api} onDone={reload} />
+          <ArchivedPanel items={archived} api={api} onRemoved={dropErrors} onNotify={setBanner} />
         )}
       </section>
     </div>
@@ -78,18 +96,91 @@ function SubTab({ active, onClick, label, count, tone }) {
 
 /* ============================ Niezmapowane (I) ============================ */
 
-function UnmappedPanel({ items, api, onDone, onNotify }) {
-  if (items.length === 0) return <p className="empty-state">Brak niezmapowanych produktów. 🎉</p>
+function useSearch(items) {
+  const [query, setQuery] = useState('')
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return items
+    return items.filter((it) => `${it.sku ?? ''} ${it.ean ?? ''} ${it.name ?? ''} ${it.offerId ?? ''}`.toLowerCase().includes(q))
+  }, [items, query])
+  return { query, setQuery, filtered }
+}
+
+function ShowMore({ shown, total, onMore }) {
+  if (shown >= total) return null
   return (
-    <div className="ac-fade-in">
-      {items.map((it) => (
-        <UnmappedCard key={it.id} item={it} api={api} onDone={onDone} onNotify={onNotify} />
-      ))}
+    <div className="button-row">
+      <button type="button" className="btn" onClick={onMore}>Pokaż kolejne {Math.min(PAGE, total - shown)} (z {total - shown})</button>
     </div>
   )
 }
 
-function UnmappedCard({ item, api, onDone, onNotify }) {
+function UnmappedPanel({ items, api, onRemoved, onNotify }) {
+  const { query, setQuery, filtered } = useSearch(items)
+  const [limit, setLimit] = useState(PAGE)
+  const [selected, setSelected] = useState(() => new Set())
+  const [busy, setBusy] = useState(false)
+
+  if (items.length === 0) return <p className="empty-state">Brak niezmapowanych produktów. 🎉</p>
+
+  const visible = filtered.slice(0, limit)
+  const toggle = (id) =>
+    setSelected((s) => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id)
+      else n.add(id)
+      return n
+    })
+
+  const ignore = async (ids) => {
+    if (ids.length === 0) return
+    setBusy(true)
+    try {
+      await api.ignoreUnmapped(ids)
+      onRemoved(ids)
+      setSelected((s) => {
+        const n = new Set(s)
+        for (const id of ids) n.delete(id)
+        return n
+      })
+      onNotify({ ok: true, text: `Zignorowano ${ids.length} poz. — dopisane do zakładki „Ignorowane", nie wrócą przy kolejnym skanie.` })
+    } catch (e) {
+      onNotify({ ok: false, text: e?.message ?? 'Nie udało się zignorować.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ac-fade-in">
+      <div className="field-row field-row--tight">
+        <input value={query} onChange={(e) => { setQuery(e.target.value); setLimit(PAGE) }} placeholder="Szukaj: SKU, EAN, nazwa…" />
+        <button type="button" className="btn btn--tiny" onClick={() => setSelected(new Set(filtered.map((it) => it.id)))} disabled={busy}>
+          Zaznacz wszystkie ({filtered.length})
+        </button>
+        <button type="button" className="btn btn--tiny" onClick={() => setSelected(new Set())} disabled={selected.size === 0 || busy}>Odznacz</button>
+        <button type="button" className="btn btn--primary" onClick={() => ignore([...selected])} disabled={selected.size === 0 || busy}>
+          {busy ? <><Spinner /> Ignoruję…</> : `Ignoruj zaznaczone (${selected.size})`}
+        </button>
+      </div>
+      {visible.map((it) => (
+        <UnmappedCard
+          key={it.id}
+          item={it}
+          api={api}
+          checked={selected.has(it.id)}
+          onToggle={() => toggle(it.id)}
+          onIgnore={() => ignore([it.id])}
+          onLinked={() => onRemoved([it.id])}
+          onNotify={onNotify}
+        />
+      ))}
+      <ShowMore shown={visible.length} total={filtered.length} onMore={() => setLimit((l) => l + PAGE)} />
+    </div>
+  )
+}
+
+function UnmappedCard({ item, api, checked, onToggle, onIgnore, onLinked, onNotify }) {
   const [channel, setChannel] = useState(item.channel ?? 'baselinker')
   const [offerId, setOfferId] = useState('')
   const [ean, setEan] = useState(item.ean ?? '')
@@ -106,7 +197,7 @@ function UnmappedCard({ item, api, onDone, onNotify }) {
     try {
       await api.resolveMapping({ sku: item.sku, channel, offerId: offerId.trim(), ean: ean.trim() || undefined })
       onNotify({ ok: true, text: `Połączono ${item.sku || item.name} ↔ ${channel}:${offerId || '(po EAN)'}.` })
-      onDone()
+      onLinked()
     } catch (e) {
       onNotify({ ok: false, text: e?.message ?? 'Nie udało się połączyć.' })
     } finally {
@@ -117,6 +208,7 @@ function UnmappedCard({ item, api, onDone, onNotify }) {
   return (
     <div className="ac-card">
       <div className="ac-card__head">
+        <input type="checkbox" className="ac-card__check" checked={checked} onChange={onToggle} aria-label={`Zaznacz ${item.sku || item.name}`} />
         <div>
           <div className="ac-card__name">{item.name || '(bez nazwy)'}</div>
           <div className="ac-card__meta">
@@ -159,7 +251,7 @@ function UnmappedCard({ item, api, onDone, onNotify }) {
           <button type="button" className="btn btn--primary" onClick={link} disabled={busy}>
             {busy ? <><Spinner /> Łączę…</> : 'Połącz'}
           </button>
-          <button type="button" className="btn" onClick={() => api.ignoreUnmapped(item.id).then(onDone)} disabled={busy}>Ignoruj</button>
+          <button type="button" className="btn" onClick={onIgnore} disabled={busy}>Ignoruj</button>
         </div>
       </div>
     </div>
@@ -168,9 +260,22 @@ function UnmappedCard({ item, api, onDone, onNotify }) {
 
 /* ============================ Błędy krytyczne (II) ======================= */
 
-function ErrorsPanel({ items, api, onDone, onNotify }) {
+/** Ukrycie/zignorowanie wpisu błędu — od razu znika z widoku. */
+async function hideError(api, id, onRemoved, onNotify) {
+  try {
+    await api.ignoreError(id)
+    onRemoved([id])
+  } catch (e) {
+    onNotify?.({ ok: false, text: e?.message ?? 'Nie udało się ukryć wpisu.' })
+  }
+}
+
+function ErrorsPanel({ items, api, onDone, onRemoved, onNotify }) {
   const [busyId, setBusyId] = useState(null)
+  const { query, setQuery, filtered } = useSearch(items)
+  const [limit, setLimit] = useState(PAGE)
   if (items.length === 0) return <p className="empty-state">Brak błędów synchronizacji. ✅</p>
+  const visible = filtered.slice(0, limit)
 
   const retry = async (id) => {
     setBusyId(id)
@@ -184,12 +289,16 @@ function ErrorsPanel({ items, api, onDone, onNotify }) {
   }
 
   return (
+    <>
+    <div className="field-row field-row--tight">
+      <input value={query} onChange={(e) => { setQuery(e.target.value); setLimit(PAGE) }} placeholder="Szukaj: SKU, EAN, oferta…" />
+    </div>
     <table className="minitable minitable--full ac-fade-in">
       <thead>
         <tr><th>Kanał</th><th>SKU</th><th>Oferta</th><th className="num">Docelowy stan</th><th>Błąd</th><th className="num">Prób</th><th>Akcje</th></tr>
       </thead>
       <tbody>
-        {items.map((e) => (
+        {visible.map((e) => (
           <tr key={e.id}>
             <td className="small">{e.channel}</td>
             <td><code>{e.sku || '—'}</code></td>
@@ -202,20 +311,24 @@ function ErrorsPanel({ items, api, onDone, onNotify }) {
                 <button type="button" className="btn btn--primary btn--tiny" onClick={() => retry(e.id)} disabled={busyId === e.id}>
                   {busyId === e.id ? <><Spinner /> Ponawiam…</> : 'Ponów (Retry)'}
                 </button>
-                <button type="button" className="btn btn--tiny" onClick={() => api.ignoreError(e.id).then(onDone)}>Ignoruj</button>
+                <button type="button" className="btn btn--tiny" onClick={() => hideError(api, e.id, onRemoved, onNotify)}>Ignoruj</button>
               </div>
             </td>
           </tr>
         ))}
       </tbody>
     </table>
+    <ShowMore shown={visible.length} total={filtered.length} onMore={() => setLimit((l) => l + PAGE)} />
+    </>
   )
 }
 
 /* ==================== 0 na stanie / Archiwum (III) ======================= */
 
-function ArchivedPanel({ items, api, onDone }) {
+function ArchivedPanel({ items, api, onRemoved, onNotify }) {
+  const [limit, setLimit] = useState(PAGE)
   if (items.length === 0) return <p className="empty-state">Brak pozycji w archiwum. 📦</p>
+  const visible = items.slice(0, limit)
   return (
     <>
       <p className="hint">
@@ -227,7 +340,7 @@ function ArchivedPanel({ items, api, onDone }) {
           <tr><th>Kanał</th><th>SKU</th><th>EAN</th><th>Oferta</th><th>Status</th><th>Akcje</th></tr>
         </thead>
         <tbody>
-          {items.map((e) => (
+          {visible.map((e) => (
             <tr key={e.id}>
               <td className="small">{e.channel}</td>
               <td><code>{e.sku || '—'}</code></td>
@@ -235,12 +348,13 @@ function ArchivedPanel({ items, api, onDone }) {
               <td className="small">{e.offerId || '—'}</td>
               <td><span className="tag tag--muted">0 na stanie (Archiwum)</span></td>
               <td>
-                <button type="button" className="btn btn--tiny" onClick={() => api.ignoreError(e.id).then(onDone)}>Ukryj</button>
+                <button type="button" className="btn btn--tiny" onClick={() => hideError(api, e.id, onRemoved, onNotify)}>Ukryj</button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+      <ShowMore shown={visible.length} total={items.length} onMore={() => setLimit((l) => l + PAGE)} />
     </>
   )
 }

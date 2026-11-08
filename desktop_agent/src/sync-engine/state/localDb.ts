@@ -40,6 +40,24 @@ export interface ChannelMapping {
   updatedAt: string
 }
 
+export interface IgnoredInput {
+  sku: string
+  /** '*' = wszystkie kanały (domyślnie), 'allegro' albo 'baselinker'. */
+  channel?: string
+  ean?: string
+  name?: string
+  note?: string
+}
+
+export interface IgnoredItem {
+  sku: string
+  channel: string
+  ean: string
+  name: string
+  note: string
+  createdAt: string
+}
+
 export interface UnmappedItem {
   id: number
   source: Origin
@@ -254,6 +272,22 @@ CREATE TABLE IF NOT EXISTS offer_sku_map (
   PRIMARY KEY (account_id, offer_id)
 );
 
+-- v6.8: pozycje WAPRO wykluczone z synchronizacji (zakładka „Ignorowane").
+-- channel = '*' (wszystkie kanały) | 'allegro' | 'baselinker'.
+CREATE TABLE IF NOT EXISTS ignored_items (
+  sku        TEXT NOT NULL,
+  channel    TEXT NOT NULL DEFAULT '*',
+  ean        TEXT NOT NULL DEFAULT '',
+  name       TEXT NOT NULL DEFAULT '',
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (sku, channel)
+);
+
+-- Szybkie wyszukiwanie otwartych pozycji kolejki (deduplikacja przy każdym skanie).
+CREATE INDEX IF NOT EXISTS ix_unmapped_open ON unmapped_queue(status, sku);
+CREATE INDEX IF NOT EXISTS ix_errors_open ON sync_errors(status, sku);
+
 -- v6.4: kody z pełnej oferty Allegro (EAN, kod producenta) — cache do automapowania.
 CREATE TABLE IF NOT EXISTS allegro_offer_details (
   account_id    TEXT NOT NULL,
@@ -351,6 +385,8 @@ export class LocalDatabase {
 
   // --- unmapped queue (Kategoria I) --------------------------------------
   enqueueUnmapped(item: Omit<UnmappedItem, 'id' | 'createdAt' | 'status'>): number {
+    // Pozycja z listy „Ignorowane" nie wraca do kolejki przy kolejnym skanie.
+    if (this.isIgnored(item.sku, item.channel ?? '*')) return 0
     // Deduplikacja: nie mnożymy tej samej otwartej pozycji (sku+channel+source).
     const existing = this.db
       .prepare(`SELECT id FROM unmapped_queue WHERE sku = ? AND IFNULL(channel,'') = ? AND source = ? AND status = 'open'`)
@@ -373,8 +409,75 @@ export class LocalDatabase {
     return (this.db.prepare('SELECT * FROM unmapped_queue WHERE status = ? ORDER BY created_at DESC').all(status) as any[]).map(mapUnmapped)
   }
 
+  getUnmapped(id: number): UnmappedItem | null {
+    const r = this.db.prepare('SELECT * FROM unmapped_queue WHERE id = ?').get(id) as any
+    return r ? mapUnmapped(r) : null
+  }
+
   setUnmappedStatus(id: number, status: QueueStatus): void {
     this.db.prepare('UPDATE unmapped_queue SET status = ? WHERE id = ?').run(status, id)
+  }
+
+  // --- ignorowane pozycje (zakładka „Ignorowane") -------------------------
+  /**
+   * Dodaje pozycje do listy ignorowanych (jedna transakcja) i zamyka ich otwarte
+   * wpisy w kolejce niezmapowanych. Zwraca liczbę nowych pozycji.
+   */
+  addIgnored(items: IgnoredInput[]): number {
+    const insert = this.db.prepare(
+      `INSERT INTO ignored_items (sku, channel, ean, name, note) VALUES (@sku, @channel, @ean, @name, @note)
+       ON CONFLICT(sku, channel) DO NOTHING`
+    )
+    const closeAll = this.db.prepare(`UPDATE unmapped_queue SET status = 'ignored' WHERE status = 'open' AND sku = ?`)
+    const closeOne = this.db.prepare(`UPDATE unmapped_queue SET status = 'ignored' WHERE status = 'open' AND sku = ? AND IFNULL(channel,'') = ?`)
+    let added = 0
+    this.db.transaction((rows: IgnoredInput[]) => {
+      for (const it of rows) {
+        const sku = String(it.sku ?? '').trim()
+        if (!sku) continue
+        const channel = normalizeIgnoredChannel(it.channel)
+        const info = insert.run({ sku, channel, ean: String(it.ean ?? '').trim(), name: String(it.name ?? '').trim(), note: String(it.note ?? '').trim() })
+        added += info.changes
+        if (channel === '*') closeAll.run(sku)
+        else closeOne.run(sku, channel)
+      }
+    })(items)
+    return added
+  }
+
+  /** Usuwa pozycje z listy ignorowanych. Zwraca liczbę usuniętych. */
+  removeIgnored(items: Array<{ sku: string; channel?: string }>): number {
+    const del = this.db.prepare('DELETE FROM ignored_items WHERE sku = ? AND channel = ?')
+    let removed = 0
+    this.db.transaction((rows: Array<{ sku: string; channel?: string }>) => {
+      for (const it of rows) removed += del.run(String(it.sku ?? '').trim(), normalizeIgnoredChannel(it.channel)).changes
+    })(items)
+    return removed
+  }
+
+  listIgnored(): IgnoredItem[] {
+    return (this.db.prepare('SELECT * FROM ignored_items ORDER BY created_at DESC, sku').all() as any[]).map((r) => ({
+      sku: r.sku,
+      channel: r.channel,
+      ean: r.ean ?? '',
+      name: r.name ?? '',
+      note: r.note ?? '',
+      createdAt: r.created_at
+    }))
+  }
+
+  /** SKU ignorowane dla kanału (wpisy kanału + „wszystkie kanały"). */
+  ignoredSkus(channel: string): Set<string> {
+    const rows = this.db.prepare(`SELECT sku FROM ignored_items WHERE channel = '*' OR channel = ?`).all(channel) as any[]
+    return new Set(rows.map((r) => String(r.sku)))
+  }
+
+  isIgnored(sku: string, channel: string): boolean {
+    if (!sku) return false
+    const r = this.db
+      .prepare(`SELECT 1 FROM ignored_items WHERE sku = ? AND (channel = '*' OR channel = ?) LIMIT 1`)
+      .get(sku, channel || '*')
+    return !!r
   }
 
   // --- sync errors (Kategoria II) ----------------------------------------
@@ -685,6 +788,10 @@ function mapProduct(r: any): LocalProduct {
 function mapMapping(r: any): ChannelMapping {
   return { id: r.id, sku: r.sku, channel: r.channel, offerId: r.offer_id, variantId: r.variant_id ?? null, via: r.via, confidence: r.confidence, status: r.status, updatedAt: r.updated_at }
 }
+function normalizeIgnoredChannel(channel?: string): string {
+  return channel === 'allegro' || channel === 'baselinker' ? channel : '*'
+}
+
 function mapUnmapped(r: any): UnmappedItem {
   let candidates: string[] = []
   try { candidates = JSON.parse(r.candidates ?? '[]') } catch { candidates = [] }

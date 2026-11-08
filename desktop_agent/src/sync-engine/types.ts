@@ -96,6 +96,8 @@ export interface SyncMatchStats {
   manualTotal: number
   /** Zmienione pozycje (delta) dopasowane wg metody. */
   viaManual: number
+  /** Zmienione pozycje pominięte, bo są na liście „Ignorowane". */
+  ignored?: number
   viaEan: number
   viaSku: number
   viaName: number
