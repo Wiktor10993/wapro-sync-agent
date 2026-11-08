@@ -10,6 +10,7 @@ import IntegrationsTab from './tabs/IntegrationsTab.jsx'
 import SyncTab from './tabs/SyncTab.jsx'
 import OrdersTab from './tabs/OrdersTab.jsx'
 import ProblemyTab from './tabs/ProblemyTab.jsx'
+import IgnorowaneTab from './tabs/IgnorowaneTab.jsx'
 import EksportTab from './tabs/EksportTab.jsx'
 import RaportTab from './tabs/RaportTab.jsx'
 import MapowanieTab from './tabs/MapowanieTab.jsx'
@@ -60,7 +61,13 @@ const SECTIONS = [
     ]
   },
   { title: 'Analityka', items: [{ id: 'analytics', label: 'Analityka', Component: AnalitykaTab }] },
-  { title: 'Problemy', items: [{ id: 'problems', label: 'Problemy', Component: ProblemyTab }] },
+  {
+    title: 'Problemy',
+    items: [
+      { id: 'problems', label: 'Problemy', Component: ProblemyTab },
+      { id: 'ignored', label: 'Ignorowane', Component: IgnorowaneTab }
+    ]
+  },
   { title: 'System', items: [{ id: 'log', label: 'Dziennik', Component: DziennikTab }] }
 ]
 

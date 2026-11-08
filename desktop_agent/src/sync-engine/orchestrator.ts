@@ -10,7 +10,7 @@
  *   6. Summary      — zwraca SyncSummary do modala w UI.
  */
 
-import type { OfferCandidate, StockRow, SyncSummary, SyncChannel, SyncLogEntry, ReviewItem, SyncMatchStats } from './types'
+import type { MatchResult, OfferCandidate, StockRow, SyncSummary, SyncChannel, SyncLogEntry, ReviewItem, SyncMatchStats } from './types'
 import { computeDelta, commitHashes } from './sync/deltaSync'
 import { LoopGuard } from './sync/loopGuard'
 import { buildOfferIndex, matchProduct, type MatcherOptions } from './matching/productMatcher'
@@ -37,6 +37,36 @@ export interface ChannelAdapter {
   ): Promise<{ updatedOfferIds: Set<string> }>
 }
 
+/**
+ * Pamięć wyników dopasowania między cyklami (per kanał/konto). Pozycje bez
+ * dopasowania nie zatwierdzają hasha, więc wracają w KAŻDYM cyklu — bez pamięci
+ * dopasowanie po nazwie (N×M) liczyło się od nowa i blokowało aplikację.
+ * Wynik jest ważny, dopóki lista ofert (`fingerprint`) się nie zmieni.
+ */
+export interface MatchCache {
+  fingerprint?: string
+  results: Map<string, MatchResult>
+}
+
+/** Co ile pozycji oddajemy wątek, żeby okno aplikacji nie zamarzało. */
+const YIELD_EVERY = 100
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+/** Odcisk listy ofert (FNV-1a) — zmiana oferty unieważnia pamięć dopasowań. */
+export function offersFingerprint(offers: OfferCandidate[]): string {
+  let h = 0x811c9dc5
+  const feed = (str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i)
+      h = Math.imul(h, 0x01000193) >>> 0
+    }
+  }
+  for (const o of offers) {
+    feed(`${o.offerId}\u0001${o.variantId ?? ''}\u0001${o.sku}\u0001${o.ean}\u0001${o.name}\u0001${(o.codes ?? []).join(',')}\u0002`)
+  }
+  return `${offers.length}:${h.toString(16)}`
+}
+
 export interface OrchestratorDeps {
   loadSnapshot: () => Promise<StockRow[]>
   loadHashes: () => Promise<Record<string, string>>
@@ -61,6 +91,13 @@ export interface OrchestratorOptions {
    * np. żeby zapamiętać je do rozpoznawania SKU w zamówieniach.
    */
   onMatched?: (pairs: Array<{ offerId: string; sku: string; via: string }>) => void | Promise<void>
+  /**
+   * Pozycje z listy „Ignorowane" — pomijane przed dopasowaniem i wysyłką.
+   * Hasha nie zatwierdzamy, więc po usunięciu z listy zsynchronizują się same.
+   */
+  isIgnored?: (row: StockRow) => boolean
+  /** Pamięć dopasowań między cyklami (patrz `MatchCache`). */
+  matchCache?: MatchCache
 }
 
 export async function runInventorySync(
@@ -129,7 +166,8 @@ export async function runInventorySync(
       viaEan: 0,
       viaSku: 0,
       viaName: 0,
-      noMatch: 0
+      noMatch: 0,
+      ignored: 0
     }
     for (const mm of options.manualOffers ?? []) {
       if (!offerIdSet.has(String(mm.offerId))) continue
@@ -138,8 +176,33 @@ export async function runInventorySync(
       if (mm.ean) manualByEan.set(String(mm.ean), String(mm.offerId))
     }
 
+    const cache = options.matchCache
+    if (cache) {
+      const fp = offersFingerprint(offers)
+      if (cache.fingerprint !== fp) {
+        cache.fingerprint = fp
+        cache.results.clear()
+      }
+    }
+    const matchRow = (row: StockRow): MatchResult => {
+      if (!cache) return matchProduct({ sku: row.sku, ean: row.ean, name: row.name }, index, options.matcher)
+      const key = `${row.sku}\u0001${row.ean}\u0001${row.name}`
+      let m = cache.results.get(key)
+      if (!m) {
+        m = matchProduct({ sku: row.sku, ean: row.ean, name: row.name }, index, options.matcher)
+        cache.results.set(key, m)
+      }
+      return m
+    }
+
     const toPush: Array<{ offerId: string; variantId?: string; quantity: number; row: StockRow; via: string }> = []
+    let processed = 0
     for (const row of afterEcho) {
+      if (++processed % YIELD_EVERY === 0) await yieldToEventLoop()
+      if (options.isIgnored?.(row)) {
+        stats.ignored = (stats.ignored ?? 0) + 1
+        continue
+      }
       const forced =
         (row.sku && manualBySku.get(String(row.sku))) || (row.ean && manualByEan.get(String(row.ean))) || null
       if (forced) {
@@ -147,7 +210,7 @@ export async function runInventorySync(
         toPush.push({ offerId: forced, quantity: row.quantity, row, via: 'manual' })
         continue
       }
-      const m = matchProduct({ sku: row.sku, ean: row.ean, name: row.name }, index, options.matcher)
+      const m = matchRow(row)
       if (m.status === 'MATCHED' && m.offerId) {
         if (m.via === 'ean') stats.viaEan++
         else if (m.via === 'sku') stats.viaSku++

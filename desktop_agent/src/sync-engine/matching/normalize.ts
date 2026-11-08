@@ -11,6 +11,13 @@ const MARKETING_NOISE = [
   'najlepszy', 'najlepsza', 'tanio', 'taniej', 'zestaw', 'komplet', 'sztuk', 'szt'
 ]
 
+/** Zbiór słów-szumu po normalizacji — liczony raz, nie przy każdym porównaniu. */
+let NOISE_SET: Set<string> | null = null
+function noiseSet(): Set<string> {
+  if (!NOISE_SET) NOISE_SET = new Set(MARKETING_NOISE.map((w) => stripDiacritics(w).toLowerCase()))
+  return NOISE_SET
+}
+
 /** Jednostki rozpoznawane jako parametry ilościowe/wymiarowe. */
 const UNIT_RE = /\b(\d+(?:[.,]\d+)?)\s?(kg|g|mg|ml|l|cm|mm|m|szt|x|pcs|w|v|ah|mah)\b/gi
 
@@ -37,7 +44,7 @@ export function normalizeName(input: string): string {
   s = s.replace(/[^a-z0-9]+/g, ' ').trim()
 
   // Usuń słowa-szum (ale zostaw tokeny z cyframi/parametrami).
-  const noise = new Set(MARKETING_NOISE.map((w) => stripDiacritics(w).toLowerCase()))
+  const noise = noiseSet()
   s = s
     .split(' ')
     .filter((t) => t.length > 0 && !noise.has(t))
@@ -49,7 +56,11 @@ export function normalizeName(input: string): string {
 
 /** Zbiór tokenów (dł. ≥ 2) znormalizowanej nazwy — do podobieństwa Jaccarda. */
 export function tokenSet(name: string): Set<string> {
-  const norm = normalizeName(name)
+  return tokensOfNorm(normalizeName(name))
+}
+
+/** Tokeny z już znormalizowanej nazwy (bez ponownej normalizacji). */
+export function tokensOfNorm(norm: string): Set<string> {
   return new Set(norm.split(' ').filter((t) => t.length >= 2))
 }
 
@@ -107,14 +118,35 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
 export function nameSimilarity(a: string, b: string): number {
   const na = normalizeName(a)
   const nb = normalizeName(b)
+  return similarityOfNorm(na, tokensOfNorm(na), nb, tokensOfNorm(nb))
+}
+
+/** Wagi podobieństwa: Jaccard tokenów + Levenshtein całych ciągów. */
+export const JACCARD_WEIGHT = 0.65
+export const LEVENSHTEIN_WEIGHT = 0.35
+
+/**
+ * To samo co `nameSimilarity`, ale na wstępnie policzonych postaciach
+ * (znormalizowana nazwa + tokeny). Gdy podano `minScore`, a sam Jaccard nie
+ * pozwala go osiągnąć, zwraca górne ograniczenie bez liczenia Levenshteina
+ * (wynik i tak jest poniżej progu, więc dokładna wartość nie ma znaczenia).
+ */
+export function similarityOfNorm(na: string, ta: Set<string>, nb: string, tb: Set<string>, minScore = -Infinity): number {
   if (!na && !nb) return 1
   if (!na || !nb) return 0
 
-  const jac = jaccard(tokenSet(a), tokenSet(b))
-  const dist = levenshtein(na, nb)
-  const lev = 1 - dist / Math.max(na.length, nb.length)
+  const jac = jaccard(ta, tb)
+  const upperBound = JACCARD_WEIGHT * jac + LEVENSHTEIN_WEIGHT
+  if (upperBound < minScore) return upperBound
+  // Levenshtein jest nie mniejszy niż różnica długości — tańszy test przed O(n·m).
+  const maxLen = Math.max(na.length, nb.length)
+  const levBound = JACCARD_WEIGHT * jac + LEVENSHTEIN_WEIGHT * (1 - Math.abs(na.length - nb.length) / maxLen)
+  if (levBound < minScore) return levBound
 
-  return 0.65 * jac + 0.35 * lev
+  const dist = levenshtein(na, nb)
+  const lev = 1 - dist / maxLen
+
+  return JACCARD_WEIGHT * jac + LEVENSHTEIN_WEIGHT * lev
 }
 
 /** Czy wszystkie parametry produktu Wapro występują w kandydacie (i odwrotnie). */

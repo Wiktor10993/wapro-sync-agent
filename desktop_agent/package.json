@@ -1,6 +1,6 @@
 {
   "name": "wapro-sync-agent",
-  "version": "6.7.0",
+  "version": "6.8.0",
   "private": true,
   "description": "Lokalny agent synchronizacji Wapro Mag ⇄ Allegro / BaseLinker (stany i zamówienia).",
   "author": {
@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run test:node && npm run test:engine",
     "test:node": "node --test test/",
-    "test:engine": "vitest run --dir src",
+    "test:engine": "vitest run --dir src --pool=forks",
     "db:up": "docker compose -f testing/docker-compose.yml up -d",
     "db:down": "docker compose -f testing/docker-compose.yml down",
     "db:seed": "node testing/seed.mjs"

@@ -60,6 +60,7 @@ import * as exportService from './services/exportService.js'
 import * as deadStockReport from './services/deadStockReport.js'
 import * as mappingCsv from './services/mappingCsv.js'
 import * as bulkMapping from './services/bulkMapping.js'
+import * as ignoredItems from './services/ignoredItems.js'
 import * as analytics from './services/analytics.js'
 import * as restockStore from './services/restockStore.js'
 import * as updater from './services/updater.js'
@@ -508,6 +509,12 @@ function registerIpc() {
   handle(CH.AC_IGNORE_UNMAPPED, async ({ id } = {}) => actionCenter.ignoreUnmapped(id))
   handle(CH.AC_RETRY_ERROR, async ({ id } = {}) => actionCenter.retryError(id))
   handle(CH.AC_IGNORE_ERROR, async ({ id } = {}) => actionCenter.ignoreError(id))
+
+  // --- Ignorowane pozycje (v6.8) -----------------------------------------
+  handle(CH.IGNORED_LIST, async () => ignoredItems.listIgnored())
+  handle(CH.IGNORED_ADD, async ({ items } = {}) => ignoredItems.addIgnored(items, log))
+  handle(CH.IGNORED_REMOVE, async ({ items } = {}) => ignoredItems.removeIgnored(items, log))
+  handle(CH.IGNORED_PICK_LIST, async () => ignoredItems.pickList())
 
   // --- eksport / raporty / mapowanie (v5) --------------------------------
   handle(CH.EXPORT_STOCKS, async ({ folder, sources, combined } = {}) =>

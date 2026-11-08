@@ -291,6 +291,47 @@
   color: var(--text-dim, #9aa8b8);
 }
 
+/* v6.8: zaznaczanie wielu pozycji + zakładka „Ignorowane" */
+.ac-card__head {
+  justify-content: flex-start;
+}
+/* Globalny styl `input` (width: 100%, padding) nie dotyczy pól wyboru. */
+.ac-card__check,
+.ign-check input,
+.ign-inline input {
+  width: auto;
+  padding: 0;
+  accent-color: var(--accent-dim);
+  cursor: pointer;
+}
+.ac-card__check {
+  margin-top: 4px;
+  flex: none;
+}
+.ign-check {
+  width: 28px;
+  text-align: center;
+}
+.ign-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+.ign-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  margin-bottom: 8px;
+}
+.ign-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
 @media (max-width: 720px) {
   .ac-map {
     align-items: stretch;

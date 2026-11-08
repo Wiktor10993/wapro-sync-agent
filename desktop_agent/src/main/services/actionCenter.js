@@ -197,9 +197,11 @@ export async function listErrors() {
 export async function resolveMapping(input) {
   return (await getOrchestrator()).resolveMapping(input)
 }
+/** `id` — jeden numer albo tablica (masowe „Ignoruj zaznaczone"). */
 export async function ignoreUnmapped(id) {
-  ;(await getOrchestrator()).ignoreUnmapped(Number(id))
-  return { ok: true }
+  const ids = Array.isArray(id) ? id.map(Number) : [Number(id)]
+  const ignored = (await getOrchestrator()).ignoreUnmapped(ids)
+  return { ok: true, ignored }
 }
 export async function retryError(id) {
   return (await getOrchestrator()).retryError(Number(id))
