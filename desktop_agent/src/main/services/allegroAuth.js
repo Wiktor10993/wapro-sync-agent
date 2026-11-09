@@ -347,7 +347,24 @@ async function exchangeCode({ auth, clientId, clientSecret, redirectUri, code, v
  * Zwraca ważny access token, odświeżając go w razie potrzeby.
  * Margines 2 minut — token nie może wygasnąć w trakcie żądania.
  */
+// Odświeżanie w toku, per konto — równoległe wywołania (SyncUp, zamówienia,
+// Allegro→WAPRO) czekają na JEDNO odświeżenie zamiast zużywać refresh_token kilka razy.
+const refreshing = new Map()
+
 export async function getValidAccessToken(accountId = 'primary', log = () => {}) {
+  const key = accountId || 'primary'
+  const inflight = refreshing.get(key)
+  if (inflight) return inflight
+  const p = getValidAccessTokenUnlocked(key, log)
+  refreshing.set(key, p)
+  try {
+    return await p
+  } finally {
+    if (refreshing.get(key) === p) refreshing.delete(key)
+  }
+}
+
+async function getValidAccessTokenUnlocked(accountId, log) {
   const allegro = getAllegroAccount(accountId, { withSecrets: true })
   if (!allegro) {
     throw new Error('Nie znaleziono konta Allegro o tym identyfikatorze.')
@@ -366,7 +383,8 @@ export async function getValidAccessToken(accountId = 'primary', log = () => {})
     throw new Error('Token Allegro wygasł, a brak refresh_token. Wymagana ponowna autoryzacja.')
   }
 
-  log('info', 'Allegro: token wygasa, odświeżam…')
+  const who = allegro.label || allegro.accountLogin || accountId
+  log('info', `Allegro „${who}": token wygasa, odświeżam…`)
 
   const { auth } = endpoints(allegro.sandbox)
   const res = await fetch(`${auth}/token`, {
@@ -400,7 +418,7 @@ export async function getValidAccessToken(accountId = 'primary', log = () => {})
     scope: data.scope
   })
 
-  log('success', 'Allegro: token odświeżony.')
+  log('success', `Allegro „${who}": token odświeżony.`)
   return data.access_token
 }
 

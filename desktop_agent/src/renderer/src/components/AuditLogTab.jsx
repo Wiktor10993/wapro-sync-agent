@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
  * Zakładka Dziennika (renderer-local JSX). `queryLogs` wstrzykiwane z zewnątrz.
@@ -8,21 +8,27 @@ const STATUS_TONE = { SUCCESS: 'tag--ok', SKIPPED: 'tag--warn', ERROR: 'tag--err
 export default function AuditLogTab({ queryLogs, pageSize = 100 }) {
   const [filter, setFilter] = useState({ limit: pageSize, offset: 0 })
   const [rows, setRows] = useState([])
-  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [searchText, setSearchText] = useState('')
+  // Numer bieżącego żądania — odpowiedzi starszych żądań ignorujemy.
+  const reqSeq = useRef(0)
 
   const load = useCallback(async (f) => {
+    const seq = ++reqSeq.current
     setLoading(true)
     setError(null)
     try {
       const res = await queryLogs(f)
+      if (seq !== reqSeq.current) return
       setRows(res.rows)
-      setTotal(res.total)
+      setHasMore(res.hasMore ?? f.offset + res.rows.length < res.total)
     } catch (e) {
+      if (seq !== reqSeq.current) return
       setError(e?.message ?? 'Błąd odczytu dziennika.')
     } finally {
-      setLoading(false)
+      if (seq === reqSeq.current) setLoading(false)
     }
   }, [queryLogs])
 
@@ -33,8 +39,17 @@ export default function AuditLogTab({ queryLogs, pageSize = 100 }) {
   const set = (key, value) =>
     setFilter((f) => ({ ...f, [key]: value, offset: key === 'offset' ? value : 0 }))
 
+  // Wyszukiwanie z opóźnieniem — każde naciśnięcie klawisza nie może wysyłać
+  // osobnego (ciężkiego) zapytania do MSSQL.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const v = searchText.trim() || undefined
+      setFilter((f) => (f.search === v ? f : { ...f, search: v, offset: 0 }))
+    }, 500)
+    return () => clearTimeout(t)
+  }, [searchText])
+
   const page = Math.floor(filter.offset / filter.limit) + 1
-  const pages = Math.max(1, Math.ceil(total / filter.limit))
 
   return (
     <div className="grid">
@@ -49,7 +64,7 @@ export default function AuditLogTab({ queryLogs, pageSize = 100 }) {
         <div className="field-row">
           <label>
             Szukaj (SKU / EAN / oferta / opis)
-            <input value={filter.search ?? ''} onChange={(e) => set('search', e.target.value || undefined)} placeholder="np. 5904619771106" />
+            <input value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder="np. 5904619771106" />
           </label>
           <label>
             Kanał
@@ -108,8 +123,8 @@ export default function AuditLogTab({ queryLogs, pageSize = 100 }) {
           <button type="button" className="btn" disabled={page <= 1 || loading} onClick={() => set('offset', Math.max(0, filter.offset - filter.limit))}>
             ← Poprzednia
           </button>
-          <span className="hint">Strona {page} z {pages} ({total} wpisów)</span>
-          <button type="button" className="btn" disabled={page >= pages || loading} onClick={() => set('offset', filter.offset + filter.limit)}>
+          <span className="hint">Strona {page}{hasMore ? ' (są kolejne)' : ''}</span>
+          <button type="button" className="btn" disabled={!hasMore || loading} onClick={() => set('offset', filter.offset + filter.limit)}>
             Następna →
           </button>
         </div>

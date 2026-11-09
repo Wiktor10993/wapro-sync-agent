@@ -16,7 +16,7 @@
 import { getPool, sql } from '../wapro/pool.js'
 import { getAllegroSalesSince, getDbSettings, setAllegroSalesSince } from '../store.js'
 import { fetchPaidAllegroOrdersSince, uniqueAllegroAccounts } from './allegroAuth.js'
-import { resolveLineSku } from './allegroSyncCore.js'
+import { createUnresolvedTracker, resolveLineSku, unmappedOfferSku } from './allegroSyncCore.js'
 import { getBufferDb } from './bufferDb.js'
 
 const DELTA_TABLE = 'INTEG.WAPRO_DELTA_BUFOR'
@@ -44,6 +44,9 @@ async function ensureDeltaTable(pool, log) {
 
 /** Okno wstecz (dni), z którego co cykl pobieramy opłacone zamówienia. */
 const LOOKBACK_DAYS = 7
+
+// Ostrzegamy o pozycjach bez indeksu tylko, gdy przybyły nowe (nie co cykl).
+const unresolvedTracker = createUnresolvedTracker()
 
 /**
  * Pobiera nowe zamówienia Allegro ze WSZYSTKICH autoryzowanych kont (bez duplikatów
@@ -94,6 +97,7 @@ async function pullForAccount(account, db, pool, log) {
   let skipped = 0
   let orders = 0
   let unresolved = 0
+  const unresolvedRefs = []
 
   for (const f of forms) {
     const ref = String(f?.id ?? '')
@@ -118,14 +122,21 @@ async function pullForAccount(account, db, pool, log) {
       }
       const sku = resolveLineSku(li, offerSku)
       if (!sku) {
+        const pseudoSku = unmappedOfferSku(li?.offer?.id)
+        // Oferta na liście „Ignorowane" — operator świadomie jej nie mapuje:
+        // nie liczymy jej jako problemu i nie zaśmiecamy logu. Nie oznaczamy też
+        // jako przetworzonej — po zdjęciu z listy i zmapowaniu stan zejdzie normalnie.
+        if (db.isIgnored(pseudoSku, 'allegro')) continue
         // Bez SKU nie wiemy, co zdjąć. NIE oznaczamy — gdy pojawi się mapowanie
-        // (CSV / automapowanie), pozycja zejdzie w kolejnym cyklu (w oknie LOOKBACK_DAYS).
+        // (CSV / automapowanie / Action Center), pozycja zejdzie w kolejnym cyklu
+        // (w oknie LOOKBACK_DAYS).
         unresolved++
+        unresolvedRefs.push(lineRef)
         try {
           db.enqueueUnmapped({
             source: 'allegro',
             channel: 'allegro',
-            sku: `oferta:${li?.offer?.id ?? '?'}`,
+            sku: pseudoSku,
             ean: '',
             name: String(li?.offer?.name ?? ''),
             quantity: qty,
@@ -166,8 +177,12 @@ async function pullForAccount(account, db, pool, log) {
   if (applied > 0 || orders > 0) {
     log('success', `Allegro→WAPRO „${account.label}": zdjęto stan dla ${applied} pozycji z ${orders} zamówień (pominięto ${skipped}).`)
   }
-  if (unresolved > 0) {
-    log('warn', `Allegro→WAPRO „${account.label}": ${unresolved} pozycji sprzedaży bez indeksu WAPRO (oferta bez sygnatury i mapowania) — czekają na mapowanie (Action Center).`)
+  const freshUnresolved = unresolvedTracker.note(source, unresolvedRefs)
+  if (freshUnresolved > 0) {
+    log(
+      'warn',
+      `Allegro→WAPRO „${account.label}": ${freshUnresolved} nowych pozycji sprzedaży bez indeksu WAPRO (oferta bez sygnatury i mapowania; łącznie czeka ${unresolved}) — zmapuj je na indeks WAPRO w „Problemy" (Action Center).`
+    )
   }
   return { fetched: forms.length, applied, skipped, orders, unresolved }
 }

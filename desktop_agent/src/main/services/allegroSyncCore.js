@@ -191,3 +191,36 @@ export function buildOrdersQuery({ limit = 20, offset = 0, status = '', fulfillm
   }
   return query.toString()
 }
+
+/** Pseudo-SKU pozycji sprzedaży, której oferta nie ma indeksu WAPRO. */
+export function unmappedOfferSku(offerId) {
+  return `oferta:${String(offerId ?? '').trim() || '?'}`
+}
+
+/** ID oferty z pseudo-SKU `oferta:<id>` albo '' gdy to zwykły indeks. */
+export function offerIdFromUnmappedSku(sku) {
+  const m = /^oferta:(.+)$/.exec(String(sku ?? '').trim())
+  return m && m[1] !== '?' ? m[1].trim() : ''
+}
+
+/**
+ * Pamięć ostrzeżeń o pozycjach bez indeksu (per źródło/konto).
+ *
+ * Takie pozycje NIE są oznaczane jako przetworzone (czekają na mapowanie), więc
+ * wracają w każdym cyklu przez całe okno wstecz. `note()` zwraca, ile z nich
+ * jest NOWYCH od poprzedniego cyklu — ostrzegamy tylko wtedy, gdy coś przybyło.
+ * Pozycje, które zniknęły (zmapowane / poza oknem), są zapominane.
+ */
+export function createUnresolvedTracker() {
+  const bySource = new Map()
+  return {
+    note(source, lineRefs) {
+      const prev = bySource.get(source) ?? new Set()
+      const next = new Set(lineRefs)
+      let fresh = 0
+      for (const r of next) if (!prev.has(r)) fresh++
+      bySource.set(source, next)
+      return fresh
+    }
+  }
+}

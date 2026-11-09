@@ -418,6 +418,66 @@ export class LocalDatabase {
     this.db.prepare('UPDATE unmapped_queue SET status = ? WHERE id = ?').run(status, id)
   }
 
+  /**
+   * Czy SKU ma już znane mapowanie w kanale — z DOWOLNEGO źródła i konta:
+   * ręczne/CSV (`manual_mappings`), dopasowanie silnika (`offer_sku_map`, Allegro,
+   * każde konto) albo mapowanie Action Center (`channel_mappings`).
+   */
+  hasKnownMapping(sku: string, channel: string): boolean {
+    if (!sku || /^oferta:/.test(sku)) return false
+    const hit =
+      this.db.prepare(`SELECT 1 FROM manual_mappings WHERE channel = ? AND sku = ? LIMIT 1`).get(channel, sku) ||
+      (channel === 'allegro' && this.db.prepare(`SELECT 1 FROM offer_sku_map WHERE sku = ? LIMIT 1`).get(sku)) ||
+      this.db.prepare(`SELECT 1 FROM channel_mappings WHERE channel = ? AND sku = ? AND status = 'active' LIMIT 1`).get(channel, sku)
+    return !!hit
+  }
+
+  /**
+   * Zamyka otwarte wpisy „Problemy", które mają już mapowanie (CSV / automapowanie /
+   * ręczne, na dowolnym koncie). Bez tego wpis raz otwarty wisiał na zawsze, choć
+   * synchronizacja dawno wysyłała stan. Dotyczy też sprzedaży `oferta:<id>`, gdy
+   * oferta ma już indeks WAPRO. Zwraca liczbę zamkniętych wpisów.
+   */
+  closeResolvedUnmapped(): number {
+    const info = this.db
+      .prepare(
+        `UPDATE unmapped_queue SET status = 'resolved'
+         WHERE status = 'open' AND (
+           (sku NOT LIKE 'oferta:%' AND sku <> '' AND (
+              EXISTS (SELECT 1 FROM manual_mappings mm WHERE mm.sku = unmapped_queue.sku
+                      AND (unmapped_queue.channel IS NULL OR mm.channel = unmapped_queue.channel))
+              OR (IFNULL(channel, 'allegro') = 'allegro'
+                  AND EXISTS (SELECT 1 FROM offer_sku_map o WHERE o.sku = unmapped_queue.sku))
+              OR EXISTS (SELECT 1 FROM channel_mappings cm WHERE cm.sku = unmapped_queue.sku AND cm.status = 'active'
+                      AND (unmapped_queue.channel IS NULL OR cm.channel = unmapped_queue.channel))
+           ))
+           OR (sku NOT LIKE 'oferta:%' AND ean <> '' AND EXISTS (
+              SELECT 1 FROM manual_mappings mm WHERE mm.ean = unmapped_queue.ean
+                     AND (unmapped_queue.channel IS NULL OR mm.channel = unmapped_queue.channel)))
+           OR (sku LIKE 'oferta:%' AND (
+              EXISTS (SELECT 1 FROM offer_sku_map o WHERE o.offer_id = substr(unmapped_queue.sku, 8))
+              OR EXISTS (SELECT 1 FROM manual_mappings mm WHERE mm.channel = 'allegro' AND mm.sku <> ''
+                         AND mm.offer_id = substr(unmapped_queue.sku, 8))
+           ))
+         )`
+      )
+      .run()
+    return Number(info.changes ?? 0)
+  }
+
+  /** Zamyka otwarte wpisy „Problemy" dla SKU, które właśnie dopasowano w kanale. */
+  resolveUnmappedForSkus(channel: string, skus: Iterable<string>): number {
+    const st = this.db.prepare(
+      `UPDATE unmapped_queue SET status = 'resolved' WHERE status = 'open' AND sku = ? AND (channel IS NULL OR channel = ?)`
+    )
+    let n = 0
+    const tx = this.db.transaction((list: string[]) => {
+      for (const sku of list) if (sku) n += Number(st.run(sku, channel).changes ?? 0)
+    })
+    tx([...new Set(skus)])
+    return n
+  }
+
   // --- ignorowane pozycje (zakładka „Ignorowane") -------------------------
   /**
    * Dodaje pozycje do listy ignorowanych (jedna transakcja) i zamyka ich otwarte
