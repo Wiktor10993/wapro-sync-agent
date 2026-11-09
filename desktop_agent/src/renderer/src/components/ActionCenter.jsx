@@ -12,6 +12,29 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 /** Ile kart/wierszy rysujemy naraz (reszta po „Pokaż kolejne"). */
 const PAGE = 50
+
+/** Progi filtra „Stan WAPRO" (0 = wszystkie). */
+const MIN_QTY_OPTIONS = [0, 1, 2, 3, 5, 10, 20]
+const MIN_QTY_KEY = 'ac.unmapped.minQty'
+
+function readMinQty() {
+  try {
+    const v = Number(localStorage.getItem(MIN_QTY_KEY))
+    return MIN_QTY_OPTIONS.includes(v) ? v : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Filtr stanu dotyczy tylko pozycji ze skanu WAPRO (stan z magazynu). Sprzedaże
+ * z kanału (`oferta:X`) zostają zawsze — trzeba je połączyć niezależnie od stanu.
+ */
+export function passesMinQty(item, minQty) {
+  if (!minQty || item.source !== 'wapro') return true
+  return Number(item.quantity ?? 0) >= minQty
+}
+
 function Spinner({ lg }) {
   return <span className={`spinner ${lg ? 'spinner--lg' : ''}`} aria-hidden="true" />
 }
@@ -116,10 +139,25 @@ function ShowMore({ shown, total, onMore }) {
 }
 
 function UnmappedPanel({ items, api, onRemoved, onNotify }) {
-  const { query, setQuery, filtered } = useSearch(items)
+  const [minQty, setMinQtyState] = useState(readMinQty)
+  const stocked = useMemo(() => items.filter((it) => passesMinQty(it, minQty)), [items, minQty])
+  const hiddenByQty = items.length - stocked.length
+  const { query, setQuery, filtered } = useSearch(stocked)
   const [limit, setLimit] = useState(PAGE)
   const [selected, setSelected] = useState(() => new Set())
   const [busy, setBusy] = useState(false)
+
+  const setMinQty = (v) => {
+    setMinQtyState(v)
+    setLimit(PAGE)
+    // Zaznaczenie ukrytych pozycji nie może zostać „w tle" (masowe Ignoruj).
+    setSelected(new Set())
+    try {
+      localStorage.setItem(MIN_QTY_KEY, String(v))
+    } catch {
+      /* brak localStorage — filtr działa do zamknięcia okna */
+    }
+  }
 
   if (items.length === 0) return <p className="empty-state">Brak niezmapowanych produktów. 🎉</p>
 
@@ -153,8 +191,16 @@ function UnmappedPanel({ items, api, onRemoved, onNotify }) {
 
   return (
     <div className="ac-fade-in">
-      <div className="field-row field-row--tight">
+      <div className="field-row field-row--tight ac-toolbar">
         <input value={query} onChange={(e) => { setQuery(e.target.value); setLimit(PAGE) }} placeholder="Szukaj: SKU, EAN, nazwa…" />
+        <label className="ac-qty-filter">
+          Stan WAPRO
+          <select value={minQty} onChange={(e) => setMinQty(Number(e.target.value))} aria-label="Minimalny stan WAPRO">
+            {MIN_QTY_OPTIONS.map((v) => (
+              <option key={v} value={v}>{v === 0 ? 'wszystkie' : `≥ ${v}`}</option>
+            ))}
+          </select>
+        </label>
         <button type="button" className="btn btn--tiny" onClick={() => setSelected(new Set(filtered.map((it) => it.id)))} disabled={busy}>
           Zaznacz wszystkie ({filtered.length})
         </button>
@@ -163,6 +209,12 @@ function UnmappedPanel({ items, api, onRemoved, onNotify }) {
           {busy ? <><Spinner /> Ignoruję…</> : `Ignoruj zaznaczone (${selected.size})`}
         </button>
       </div>
+      {hiddenByQty > 0 && (
+        <p className="hint">
+          Ukryto {hiddenByQty} poz. ze stanem WAPRO poniżej {minQty} — zmień filtr „Stan WAPRO" na „wszystkie", żeby je zobaczyć.
+        </p>
+      )}
+      {filtered.length === 0 && <p className="empty-state">Brak pozycji dla wybranego filtra.</p>}
       {visible.map((it) => (
         <UnmappedCard
           key={it.id}
