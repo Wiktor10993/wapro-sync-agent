@@ -97,7 +97,7 @@ export class SyncLog {
   }
 
   /** Odczyt z filtrowaniem, wyszukiwaniem i paginacją (do zakładki UI). */
-  async query(filter: LogFilter = {}): Promise<{ rows: SyncLogEntry[]; total: number }> {
+  async query(filter: LogFilter = {}): Promise<{ rows: SyncLogEntry[]; total: number; hasMore: boolean }> {
     const pool = await this.getPool()
     const req = pool.request()
     const where: string[] = ['1=1']
@@ -130,19 +130,24 @@ export class SyncLog {
     const whereSql = where.join(' AND ')
     const limit = Math.min(1000, Math.max(1, filter.limit ?? 100))
     const offset = Math.max(0, filter.offset ?? 0)
-    req.input('limit', sql.Int, limit)
+    req.input('limit', sql.Int, limit + 1)
     req.input('offset', sql.Int, offset)
 
+    // Bez COUNT(*) OVER(): liczenie zmuszało SQL Server do przeczytania CAŁEJ
+    // tabeli przy każdym odczycie (przy milionach wierszy → timeout 60 s).
+    // Pobieramy stronę + 1 wiersz po indeksie IX_INTEG_LOG_TS — tyle wystarczy,
+    // żeby wiedzieć, czy jest następna strona.
     const result = await req.query(`
-      SELECT COUNT(*) OVER() AS TOTAL,
-             ID, TS, DIRECTION, CHANNEL, SKU, EAN, OFFER_ID, QTY_BEFORE, QTY_AFTER, STATUS, MESSAGE
+      SELECT ID, TS, DIRECTION, CHANNEL, SKU, EAN, OFFER_ID, QTY_BEFORE, QTY_AFTER, STATUS, MESSAGE
       FROM ${SCHEMA}.${TABLE} WITH (NOLOCK)
       WHERE ${whereSql}
       ORDER BY TS DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;
     `)
 
-    const rows: SyncLogEntry[] = result.recordset.map((r: any) => ({
+    const hasMore = result.recordset.length > limit
+    const page = hasMore ? result.recordset.slice(0, limit) : result.recordset
+    const rows: SyncLogEntry[] = page.map((r: any) => ({
       id: Number(r.ID),
       ts: new Date(r.TS).toISOString(),
       direction: r.DIRECTION,
@@ -156,7 +161,30 @@ export class SyncLog {
       message: r.MESSAGE ?? ''
     }))
 
-    const total = result.recordset.length ? Number(result.recordset[0].TOTAL) : 0
-    return { rows, total }
+    // `total` — dolne oszacowanie (wiersze do końca tej strony, +1 gdy jest dalej).
+    const total = offset + rows.length + (hasMore ? 1 : 0)
+    return { rows, total, hasMore }
+  }
+
+  /**
+   * Retencja: usuwa wpisy starsze niż `days` dni, paczkami (krótkie blokady,
+   * bez rozdmuchania dziennika transakcji). Zwraca liczbę usuniętych wierszy.
+   */
+  async purgeOlderThan(days: number, { batchSize = 5000, maxBatches = 200 } = {}): Promise<number> {
+    if (!(days > 0)) return 0
+    const pool = await this.getPool()
+    const cutoff = new Date(Date.now() - days * 86400_000)
+    let total = 0
+    for (let i = 0; i < maxBatches; i++) {
+      const r = await pool
+        .request()
+        .input('cutoff', sql.DateTime2, cutoff)
+        .input('n', sql.Int, batchSize)
+        .query(`DELETE TOP (@n) FROM ${SCHEMA}.${TABLE} WHERE TS < @cutoff;`)
+      const n = Number(r.rowsAffected?.[0] ?? 0)
+      total += n
+      if (n < batchSize) break
+    }
+    return total
   }
 }

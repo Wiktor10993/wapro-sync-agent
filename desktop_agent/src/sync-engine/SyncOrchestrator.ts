@@ -254,6 +254,11 @@ export class SyncOrchestrator {
     const existing = this.db.getMapping(product.sku, channel)
     if (existing && existing.status === 'active') return { offerId: existing.offerId, variantId: existing.variantId }
 
+    // SKU zmapowane przez CSV / automapowanie głównej synchronizacji (także na innym
+    // koncie Allegro niż to, które widzi Action Center) — stan wysyła główny
+    // przebieg, więc NIE zgłaszamy go jako problemu.
+    if (this.db.hasKnownMapping(product.sku, channel)) return null
+
     // Auto-dopasowanie (EAN → SKU → nazwa + próg).
     const index = await this.getOfferIndex(channel)
     const m = matchProduct({ sku: product.sku, ean: product.ean, name: product.name }, index, this.options.matcher)
@@ -281,7 +286,25 @@ export class SyncOrchestrator {
   // =========================================================================
 
   /** Ręczne połączenie towaru z ofertą kanału (zapis na stałe). */
-  async resolveMapping(input: { sku: string; channel: Channel; offerId: string; variantId?: string | null; ean?: string }): Promise<void> {
+  async resolveMapping(input: { sku: string; channel: Channel; offerId: string; variantId?: string | null; ean?: string; waproSku?: string }): Promise<void> {
+    // Sprzedaż oferty bez indeksu (pseudo-SKU `oferta:<id>`): brakuje INDEKSU WAPRO,
+    // nie oferty. Zapisujemy mapowanie oferta → indeks (to samo co import CSV),
+    // z którego korzysta Allegro→WAPRO i SyncUp. Wcześniej zapisywało się
+    // `oferta:<id> ↔ allegro:<id>`, co niczego nie rozwiązywało i pozycja wracała.
+    const pseudo = /^oferta:(.+)$/.exec(String(input.sku ?? '').trim())
+    if (pseudo && pseudo[1] !== '?') {
+      const offerId = pseudo[1].trim()
+      const waproSku = String(input.waproSku ?? '').trim()
+      if (!waproSku || /^oferta:/i.test(waproSku) || waproSku === offerId) {
+        throw new Error('Podaj indeks (symbol) towaru z WAPRO — numer oferty Allegro jest już znany.')
+      }
+      this.db.upsertManualMapping({ channel: 'allegro', offerId, sku: waproSku, ean: input.ean ?? '' })
+      for (const item of this.db.listUnmapped('open')) {
+        if (item.sku === input.sku) this.db.setUnmappedStatus(item.id, 'resolved')
+      }
+      this.log('success', `Zmapowano ręcznie ofertę Allegro ${offerId} → indeks WAPRO ${waproSku} (sprzedaż zejdzie w kolejnym cyklu).`)
+      return
+    }
     if (input.ean) {
       const p = this.db.getProductBySku(input.sku)
       if (p) this.db.upsertProduct({ sku: p.sku, ean: input.ean, name: p.name, waproId: p.waproId, quantity: p.quantity })
@@ -351,6 +374,9 @@ export class SyncOrchestrator {
 
   // Dane dla UI:
   listUnmapped() {
+    // Samonaprawa: zamknij wpisy, które w międzyczasie dostały mapowanie.
+    const closed = this.db.closeResolvedUnmapped()
+    if (closed > 0) this.log('info', `Problemy: zamknięto ${closed} wpisów, które mają już mapowanie.`)
     return this.db.listUnmapped('open')
   }
   listErrors() {

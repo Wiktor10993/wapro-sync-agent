@@ -179,6 +179,9 @@ export async function runAllegroSyncUp(log = () => {}) {
 // SyncDown — zamówienia
 // ===========================================================================
 
+/** Czy ostrzeżenie „brak folderu XML" zostało już pokazane (reset po ustawieniu folderu). */
+let warnedNoXmlFolder = false
+
 export async function runSyncDown(log = () => {}) {
   if (running.down) {
     log('warn', 'SyncDown już trwa — pomijam ten przebieg.')
@@ -203,11 +206,17 @@ export async function runSyncDown(log = () => {}) {
     // Fail-fast: zamówienia BaseLinker w trybie XML wymagają folderu; bez niego
     // nie pobieramy ich (Allegro-stan już przeleciał wyżej).
     if ((sync.orderMode ?? 'xml') !== 'staging' && !sync.xmlOutputFolder) {
-      log('warn', 'SyncDown: zamówienia BaseLinker pominięte — nie wskazano folderu na pliki XML (Synchronizacja → „Folder na pliki XML").')
+      // Stan konfiguracji, nie błąd cyklu — ostrzegamy raz (do zmiany ustawień),
+      // zamiast zaśmiecać log co kilka minut.
+      if (!warnedNoXmlFolder) {
+        warnedNoXmlFolder = true
+        log('warn', 'SyncDown: zamówienia BaseLinker pominięte — nie wskazano folderu na pliki XML (Synchronizacja → „Folder na pliki XML"). Kolejne cykle pominą je bez ostrzeżenia.')
+      }
       markSync('down')
       return { skipped: true, reason: 'no-xml-folder', allegroStock }
     }
 
+    warnedNoXmlFolder = false
     log('info', 'SyncDown: pobieram zamówienia z BaseLinkera…')
     const rawOrders = await blApi.getOrders({ includeUnconfirmed: false }, log)
 

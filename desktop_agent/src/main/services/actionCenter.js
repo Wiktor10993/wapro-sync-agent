@@ -164,6 +164,14 @@ async function getOrchestrator() {
       { loopGuardCooldownMs: 120_000, log: (level, message) => logger(level, message) }
     )
     logger('info', `Action Center: bufor SQLite w ${dbPath}${MOCK_CHANNELS ? ' [MOCK kanałów AKTYWNY]' : ''}.`)
+    // Jednorazowe sprzątanie: wpisy „Problemy" otwarte przed v6.8.1, które mają już
+    // mapowanie (CSV / automapowanie na dowolnym koncie), zamykamy od razu.
+    try {
+      const closed = db.closeResolvedUnmapped()
+      if (closed > 0) logger('info', `Problemy: zamknięto ${closed} starych wpisów, które mają już mapowanie.`)
+    } catch (err) {
+      logger('warn', `Problemy: sprzątanie wpisów nieudane: ${err?.message ?? err}`)
+    }
     return orchestrator
   } catch (err) {
     initError = new Error(

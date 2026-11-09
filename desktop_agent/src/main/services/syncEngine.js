@@ -12,6 +12,7 @@
 import { runInventorySync } from '../../sync-engine/orchestrator'
 import { LoopGuard } from '../../sync-engine/sync/loopGuard'
 import { SyncLog } from '../../sync-engine/db/syncLog'
+import { createLogDeduper } from '../../sync-engine/db/logDedupe'
 
 import { fetchStockSnapshot } from '../wapro/inventoryRepository.js'
 import { getPool } from '../wapro/pool.js'
@@ -37,6 +38,44 @@ import {
 const loopGuard = new LoopGuard()
 const syncLog = new SyncLog(() => getPool(getDbSettings()))
 let auditReady = false
+
+/** Ile dni trzymamy wpisy INTEG_LOG_SYNC (starsze czyścimy paczkami). */
+const AUDIT_RETENTION_DAYS = 30
+/** Jak często (najwyżej) uruchamiać czyszczenie podczas pracy. */
+const AUDIT_PURGE_EVERY_MS = 6 * 3600_000
+let lastAuditPurgeMs = 0
+let auditPurging = null
+
+// Tłumienie powtórek „Brak dopasowania"/„WYMAGA WERYFIKACJI" — osobno per kanał/konto.
+const auditDedupers = new Map()
+function dedupeAudit(key, entries) {
+  let d = auditDedupers.get(key)
+  if (!d) {
+    d = createLogDeduper()
+    auditDedupers.set(key, d)
+  }
+  return d.filter(entries)
+}
+
+/** Retencja dziennika w tle (best-effort, bez blokowania synchronizacji). */
+function maybePurgeAudit() {
+  if (auditPurging || Date.now() - lastAuditPurgeMs < AUDIT_PURGE_EVERY_MS) return auditPurging
+  lastAuditPurgeMs = Date.now()
+  auditPurging = syncLog
+    .purgeOlderThan(AUDIT_RETENTION_DAYS)
+    .catch((err) => console.warn('[audit] czyszczenie dziennika nieudane:', err?.message ?? err))
+    .finally(() => {
+      auditPurging = null
+    })
+  return auditPurging
+}
+
+/** Zapis dziennika: bez powtórek SKIPPED + okresowe czyszczenie starych wpisów. */
+async function writeAudit(key, entries) {
+  const fresh = dedupeAudit(key, entries)
+  if (fresh.length) await syncLog.insertMany(fresh)
+  maybePurgeAudit()
+}
 
 // Pamięć dopasowań per kanał/konto (klucz = guardKey adaptera) — patrz MatchCache.
 const matchCaches = new Map()
@@ -67,6 +106,8 @@ export async function ensureAuditSchema() {
   if (auditReady) return
   await syncLog.ensureSchema()
   auditReady = true
+  // Pierwsze czyszczenie przy starcie — w tle, żeby nie opóźniać GUI.
+  maybePurgeAudit()
 }
 
 /** Odczyt stanów z Wapro → kształt StockRow silnika. */
@@ -228,10 +269,21 @@ export async function runBaselinkerSync(log = () => {}) {
       loadSnapshot,
       loadHashes: async () => getStockHashes(),
       saveHashes: async (h) => setStockHashes(h),
-      writeLog: (entries) => syncLog.insertMany(entries),
+      writeLog: (entries) => writeAudit('baselinker', entries),
       loopGuard
     },
-    { matcher: {}, batch: batchFromSettings(), manualOffers, isIgnored, matchCache: matchCacheFor('baselinker') }
+    {
+      matcher: {},
+      batch: batchFromSettings(),
+      manualOffers,
+      isIgnored,
+      matchCache: matchCacheFor('baselinker'),
+      // Udane dopasowanie zamyka wpis w „Problemy" (inaczej wisiałby na zawsze).
+      onMatched: async (pairs) => {
+        const db = await getBufferDb()
+        db.resolveUnmappedForSkus('baselinker', pairs.map((p) => p.sku))
+      }
+    }
   )
   if (summary.stats) {
     const st = summary.stats
@@ -280,7 +332,7 @@ export async function runAllegroSync(log = () => {}) {
           loadSnapshot: loadSnapshotOnce,
           loadHashes: async () => getAllegroStockHashes(a.id),
           saveHashes: async (h) => setAllegroStockHashes(a.id, h),
-          writeLog: (entries) => syncLog.insertMany(entries),
+          writeLog: (entries) => writeAudit(`allegro:${a.id}`, entries),
           loopGuard
         },
         {
@@ -290,7 +342,10 @@ export async function runAllegroSync(log = () => {}) {
           isIgnored,
           matchCache: matchCacheFor(adapter.guardKey),
           // Zapamiętujemy oferta → SKU: zamówienia z ofert bez sygnatury też zdejmą stan WAPRO.
-          onMatched: (pairs) => db.saveOfferSkus(a.id, pairs)
+          onMatched: (pairs) => {
+            db.saveOfferSkus(a.id, pairs)
+            db.resolveUnmappedForSkus('allegro', pairs.map((p) => p.sku))
+          }
         }
       )
       agg.checked += summary.checked ?? 0
@@ -335,5 +390,15 @@ function describeStats(label, summary) {
 /** Odczyt dziennika dla zakładki UI. */
 export async function queryAuditLog(filter = {}) {
   await ensureAuditSchema()
-  return syncLog.query(filter)
+  try {
+    return await syncLog.query(filter)
+  } catch (err) {
+    if (/timeout|failed to complete/i.test(String(err?.message ?? err)) || err?.code === 'ETIMEOUT') {
+      throw new Error(
+        'Dziennik odpowiada zbyt długo (ponad 60 s). Zawęź wyszukiwanie zakresem dat lub kanałem — ' +
+          `stare wpisy (ponad ${AUDIT_RETENTION_DAYS} dni) są czyszczone automatycznie.`
+      )
+    }
+    throw err
+  }
 }

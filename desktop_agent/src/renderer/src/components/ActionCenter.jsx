@@ -185,8 +185,29 @@ function UnmappedCard({ item, api, checked, onToggle, onIgnore, onLinked, onNoti
   const [offerId, setOfferId] = useState('')
   const [ean, setEan] = useState(item.ean ?? '')
   const [busy, setBusy] = useState(false)
+  const [waproSku, setWaproSku] = useState('')
 
   const channelLabel = channel === 'allegro' ? 'Allegro' : 'BaseLinker'
+  // Sprzedaż nieznanej oferty Allegro: oferta jest znana, brakuje INDEKSU WAPRO.
+  const saleOfferId = (/^oferta:(.+)$/.exec(String(item.sku ?? '')) || [])[1]
+  const isSaleOffer = Boolean(saleOfferId && saleOfferId !== '?')
+
+  const linkSale = async () => {
+    if (!waproSku.trim()) {
+      onNotify({ ok: false, text: 'Podaj indeks (symbol) towaru z WAPRO.' })
+      return
+    }
+    setBusy(true)
+    try {
+      await api.resolveMapping({ sku: item.sku, channel: 'allegro', offerId: saleOfferId, waproSku: waproSku.trim() })
+      onNotify({ ok: true, text: `Połączono ofertę Allegro ${saleOfferId} → indeks WAPRO ${waproSku.trim()}.` })
+      onLinked()
+    } catch (e) {
+      onNotify({ ok: false, text: e?.message ?? 'Nie udało się połączyć.' })
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const link = async () => {
     if (!offerId.trim() && !ean.trim()) {
@@ -231,6 +252,20 @@ function UnmappedCard({ item, api, checked, onToggle, onIgnore, onLinked, onNoti
         )}
       </div>
 
+      {isSaleOffer ? (
+      <div className="ac-map">
+        <div className="ac-field ac-field--grow">
+          <label htmlFor={`wsku-${item.id}`}>Indeks WAPRO dla oferty Allegro {saleOfferId}</label>
+          <input id={`wsku-${item.id}`} value={waproSku} onChange={(e) => setWaproSku(e.target.value)} placeholder="symbol / indeks towaru z WAPRO" autoComplete="off" />
+        </div>
+        <div className="ac-map__actions">
+          <button type="button" className="btn btn--primary" onClick={linkSale} disabled={busy}>
+            {busy ? <><Spinner /> Łączę…</> : 'Połącz'}
+          </button>
+          <button type="button" className="btn" onClick={onIgnore} disabled={busy}>Ignoruj</button>
+        </div>
+      </div>
+      ) : (
       <div className="ac-map">
         <div className="ac-field">
           <label htmlFor={`ch-${item.id}`}>Kanał</label>
@@ -254,6 +289,7 @@ function UnmappedCard({ item, api, checked, onToggle, onIgnore, onLinked, onNoti
           <button type="button" className="btn" onClick={onIgnore} disabled={busy}>Ignoruj</button>
         </div>
       </div>
+      )}
     </div>
   )
 }

@@ -92,3 +92,25 @@ describe('pickOfferId — strategia EAN → SKU → Tytuł', () => {
     assert.deepEqual(pickOfferId(maps, 'ART-2'), { offerId: '222', via: 'sku' })
   })
 })
+
+describe('pozycje sprzedaży bez indeksu WAPRO (v6.8.1)', () => {
+  it('pseudo-SKU oferty i odczyt ID z powrotem', async () => {
+    const { unmappedOfferSku, offerIdFromUnmappedSku } = await import('../src/main/services/allegroSyncCore.js')
+    assert.equal(unmappedOfferSku('123'), 'oferta:123')
+    assert.equal(unmappedOfferSku(undefined), 'oferta:?')
+    assert.equal(offerIdFromUnmappedSku('oferta:123'), '123')
+    assert.equal(offerIdFromUnmappedSku('oferta:?'), '')
+    assert.equal(offerIdFromUnmappedSku('WOB-1'), '')
+  })
+
+  it('tracker ostrzega tylko o nowych pozycjach, nie co cykl', async () => {
+    const { createUnresolvedTracker } = await import('../src/main/services/allegroSyncCore.js')
+    const t = createUnresolvedTracker()
+    assert.equal(t.note('allegro:a', ['z1:1', 'z1:2']), 2)
+    assert.equal(t.note('allegro:a', ['z1:1', 'z1:2']), 0) // ten sam zestaw — cisza
+    assert.equal(t.note('allegro:b', ['z1:1']), 1) // inne konto liczone osobno
+    assert.equal(t.note('allegro:a', ['z1:2', 'z2:1']), 1) // jedna nowa
+    assert.equal(t.note('allegro:a', []), 0)
+    assert.equal(t.note('allegro:a', ['z1:2']), 1) // po zniknięciu i powrocie — znów nowa
+  })
+})
