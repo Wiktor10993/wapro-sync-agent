@@ -17,22 +17,55 @@ const PAGE = 50
 const MIN_QTY_OPTIONS = [0, 1, 2, 3, 5, 10, 20]
 const MIN_QTY_KEY = 'ac.unmapped.minQty'
 
-function readMinQty() {
+/** Filtr „Pokaż": wszystko / towary ze skanu WAPRO / sprzedaże z zamówień. */
+const KIND_OPTIONS = [
+  { value: 'all', label: 'wszystko' },
+  { value: 'wapro', label: 'towary z WAPRO' },
+  { value: 'sales', label: 'sprzedaże z zamówień' }
+]
+const KIND_KEY = 'ac.unmapped.kind'
+
+function readStored(key, allowed, fallback) {
   try {
-    const v = Number(localStorage.getItem(MIN_QTY_KEY))
-    return MIN_QTY_OPTIONS.includes(v) ? v : 0
+    const raw = localStorage.getItem(key)
+    if (raw === null) return fallback
+    const v = typeof fallback === 'number' ? Number(raw) : raw
+    return allowed.includes(v) ? v : fallback
   } catch {
-    return 0
+    return fallback
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, String(value))
+  } catch {
+    /* brak localStorage — filtr działa do zamknięcia okna */
   }
 }
 
 /**
- * Filtr stanu dotyczy tylko pozycji ze skanu WAPRO (stan z magazynu). Sprzedaże
- * z kanału (`oferta:X`) zostają zawsze — trzeba je połączyć niezależnie od stanu.
+ * Pozycja ze skanu WAPRO ma w `quantity` stan magazynowy. Pozycja ze sprzedaży
+ * (`oferta:X`, source = kanał) ma tam liczbę SPRZEDANYCH sztuk — towaru nie ma
+ * w WAPRO (brak indeksu), więc nie ma też stanu WAPRO.
  */
-export function passesMinQty(item, minQty) {
-  if (!minQty || item.source !== 'wapro') return true
-  return Number(item.quantity ?? 0) >= minQty
+export function isSaleItem(item) {
+  return item.source !== 'wapro'
+}
+
+/**
+ * Łączny filtr listy „Niezmapowane produkty".
+ * - `kind`: 'all' | 'wapro' | 'sales';
+ * - `minQty` > 0: tylko towary z WAPRO o stanie ≥ minQty. Sprzedaże nie mają stanu
+ *   WAPRO, więc przy ustawionym progu znikają (chyba że wybrano „sprzedaże" —
+ *   wtedy próg nie ma zastosowania).
+ */
+export function passesUnmappedFilter(item, { kind = 'all', minQty = 0 } = {}) {
+  const sale = isSaleItem(item)
+  if (kind === 'wapro' && sale) return false
+  if (kind === 'sales') return sale
+  if (minQty > 0) return !sale && Number(item.quantity ?? 0) >= minQty
+  return true
 }
 
 function Spinner({ lg }) {
@@ -139,25 +172,36 @@ function ShowMore({ shown, total, onMore }) {
 }
 
 function UnmappedPanel({ items, api, onRemoved, onNotify }) {
-  const [minQty, setMinQtyState] = useState(readMinQty)
-  const stocked = useMemo(() => items.filter((it) => passesMinQty(it, minQty)), [items, minQty])
-  const hiddenByQty = items.length - stocked.length
-  const { query, setQuery, filtered } = useSearch(stocked)
+  const [minQty, setMinQtyState] = useState(() => readStored(MIN_QTY_KEY, MIN_QTY_OPTIONS, 0))
+  const [kind, setKindState] = useState(() => readStored(KIND_KEY, KIND_OPTIONS.map((o) => o.value), 'all'))
+  const counts = useMemo(() => {
+    let sales = 0
+    for (const it of items) if (isSaleItem(it)) sales++
+    return { all: items.length, sales, wapro: items.length - sales }
+  }, [items])
+  const shownByFilter = useMemo(() => items.filter((it) => passesUnmappedFilter(it, { kind, minQty })), [items, kind, minQty])
+  const hiddenCount = items.length - shownByFilter.length
+  const { query, setQuery, filtered } = useSearch(shownByFilter)
   const [limit, setLimit] = useState(PAGE)
   const [selected, setSelected] = useState(() => new Set())
   const [busy, setBusy] = useState(false)
 
-  const setMinQty = (v) => {
-    setMinQtyState(v)
+  const resetView = () => {
     setLimit(PAGE)
     // Zaznaczenie ukrytych pozycji nie może zostać „w tle" (masowe Ignoruj).
     setSelected(new Set())
-    try {
-      localStorage.setItem(MIN_QTY_KEY, String(v))
-    } catch {
-      /* brak localStorage — filtr działa do zamknięcia okna */
-    }
   }
+  const setMinQty = (v) => {
+    setMinQtyState(v)
+    writeStored(MIN_QTY_KEY, v)
+    resetView()
+  }
+  const setKind = (v) => {
+    setKindState(v)
+    writeStored(KIND_KEY, v)
+    resetView()
+  }
+  const qtyFilterOff = kind === 'sales'
 
   if (items.length === 0) return <p className="empty-state">Brak niezmapowanych produktów. 🎉</p>
 
@@ -194,8 +238,16 @@ function UnmappedPanel({ items, api, onRemoved, onNotify }) {
       <div className="field-row field-row--tight ac-toolbar">
         <input value={query} onChange={(e) => { setQuery(e.target.value); setLimit(PAGE) }} placeholder="Szukaj: SKU, EAN, nazwa…" />
         <label className="ac-qty-filter">
+          Pokaż
+          <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Rodzaj pozycji">
+            {KIND_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label} ({counts[o.value]})</option>
+            ))}
+          </select>
+        </label>
+        <label className="ac-qty-filter" title={qtyFilterOff ? 'Sprzedaże z zamówień nie mają indeksu WAPRO, więc nie mają stanu WAPRO.' : undefined}>
           Stan WAPRO
-          <select value={minQty} onChange={(e) => setMinQty(Number(e.target.value))} aria-label="Minimalny stan WAPRO">
+          <select value={qtyFilterOff ? 0 : minQty} disabled={qtyFilterOff} onChange={(e) => setMinQty(Number(e.target.value))} aria-label="Minimalny stan WAPRO">
             {MIN_QTY_OPTIONS.map((v) => (
               <option key={v} value={v}>{v === 0 ? 'wszystkie' : `≥ ${v}`}</option>
             ))}
@@ -209,9 +261,19 @@ function UnmappedPanel({ items, api, onRemoved, onNotify }) {
           {busy ? <><Spinner /> Ignoruję…</> : `Ignoruj zaznaczone (${selected.size})`}
         </button>
       </div>
-      {hiddenByQty > 0 && (
+      {hiddenCount > 0 && (
         <p className="hint">
-          Ukryto {hiddenByQty} poz. ze stanem WAPRO poniżej {minQty} — zmień filtr „Stan WAPRO" na „wszystkie", żeby je zobaczyć.
+          Ukryto {hiddenCount} poz. przez filtry
+          {!qtyFilterOff && minQty > 0 && kind === 'all' && counts.sales > 0
+            ? ` (w tym ${counts.sales} sprzedaży z zamówień — nie mają indeksu WAPRO, więc nie mają stanu WAPRO; zobaczysz je w „Pokaż: sprzedaże z zamówień")`
+            : ''}
+          .
+        </p>
+      )}
+      {kind !== 'wapro' && counts.sales > 0 && (
+        <p className="hint">
+          „Sprzedaże z zamówień" (SKU <code>oferta:…</code>) to oferty Allegro bez sygnatury i bez mapowania — program nie wie, z którego towaru
+          WAPRO zdjąć sprzedane sztuki. Wpisz indeks WAPRO i kliknij „Połącz" albo „Ignoruj", jeśli oferta nie dotyczy WAPRO.
         </p>
       )}
       {filtered.length === 0 && <p className="empty-state">Brak pozycji dla wybranego filtra.</p>}
@@ -288,7 +350,9 @@ function UnmappedCard({ item, api, checked, onToggle, onIgnore, onLinked, onNoti
             <span className="tag tag--muted">{item.source}</span>
             <span>SKU <code>{item.sku || '—'}</code></span>
             <span>EAN <code>{item.ean || '—'}</code></span>
-            <span>stan <strong>{item.quantity}</strong></span>
+            {isSaleItem(item)
+              ? <span>sprzedano <strong>{item.quantity}</strong> szt.</span>
+              : <span>stan WAPRO <strong>{item.quantity}</strong></span>}
           </div>
         </div>
       </div>
